@@ -1,9 +1,14 @@
 use actix_web::{web, App, HttpResponse, HttpServer};
+use reqwest::Client;
+use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
-use std::env;
+use std::time::Duration;
+
 mod models;
 use models::{User, NewUser};
+
+const XRAY_API_URL: &str = "http://localhost:62789/api";
 
 // Создать пользователя
 async fn create_user(
@@ -11,8 +16,16 @@ async fn create_user(
     data: web::Json<NewUser>,
 ) -> HttpResponse {
     let uuid = Uuid::new_v4().to_string();
-    
-    let user = sqlx::query_as!(
+    let client = Client::new();
+
+    // Начать транзакцию
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    // Добавить в БД
+    let user = match sqlx::query_as!(
         User,
         r#"
         INSERT INTO users (telegram_id, uuid, subscription_end, is_active)
@@ -23,29 +36,33 @@ async fn create_user(
         uuid,
         data.subscription_days as i32
     )
-    .fetch_one(pool.get_ref())
-    .await;
+    .fetch_one(&mut *tx)
+    .await {
+        Ok(user) => user,
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
 
-    match user {
-        Ok(user) => HttpResponse::Ok().json(user),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    // Добавить в Xray
+    let xray_response = client.post(&format!("{}/users", XRAY_API_URL))
+        .json(&json!({
+            "email": format!("{}@vpn.com", uuid),
+            "uuid": uuid,
+            "inboundTag": "your-inbound-tag"
+        }))
+        .send()
+        .await;
+
+    if let Err(e) = xray_response {
+        let _ = tx.rollback().await;
+        return HttpResponse::InternalServerError().body(format!("Xray API error: {}", e));
     }
-}
 
-// Получить пользователя по UUID
-async fn get_user(pool: web::Data<PgPool>, uuid: web::Path<String>) -> HttpResponse {
-    let user = sqlx::query_as!(
-        User,
-        "SELECT * FROM users WHERE uuid = $1",
-        uuid.into_inner()
-    )
-    .fetch_one(pool.get_ref())
-    .await;
-
-    match user {
-        Ok(user) => HttpResponse::Ok().json(user),
-        Err(_) => HttpResponse::NotFound().finish(),
+    // Завершить транзакцию
+    if let Err(e) = tx.commit().await {
+        return HttpResponse::InternalServerError().body(e.to_string());
     }
+
+    HttpResponse::Ok().json(user)
 }
 
 // Продлить подписку
@@ -54,22 +71,71 @@ async fn extend_subscription(
     uuid: web::Path<String>,
     days: web::Json<u32>,
 ) -> HttpResponse {
-    let result = sqlx::query!(
+    let client = Client::new();
+    let uuid = uuid.into_inner();
+
+    // Обновить в БД
+    let result = match sqlx::query!(
         r#"
         UPDATE users 
-        SET subscription_end = subscription_end + INTERVAL '1 day' * $1
+        SET subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day'
         WHERE uuid = $2
         RETURNING *
         "#,
         *days as i32,
-        *uuid
+        uuid
     )
     .fetch_one(pool.get_ref())
-    .await;
+    .await {
+        Ok(user) => user,
+        Err(_) => return HttpResponse::NotFound().finish(),
+    };
 
-    match result {
-        Ok(user) => HttpResponse::Ok().json(user),
-        Err(_) => HttpResponse::NotFound().finish(),
+    // Обновить в Xray (добавить если был удален)
+    let _ = client.post(&format!("{}/users", XRAY_API_URL))
+        .json(&json!({
+            "email": format!("{}@vpn.com", uuid),
+            "uuid": uuid,
+            "inboundTag": "your-inbound-tag"
+        }))
+        .send()
+        .await;
+
+    HttpResponse::Ok().json(result)
+}
+
+// Фоновая задача для очистки
+async fn cleanup_task(pool: web::Data<PgPool>) {
+    let client = Client::new();
+    let mut interval = tokio::time::interval(Duration::from_secs(3600)); // Каждый час
+    
+    loop {
+        interval.tick().await;
+        
+        // Получить просроченных пользователей
+        let expired_users = match sqlx::query!(
+            "SELECT uuid FROM users WHERE subscription_end < NOW() AND is_active = TRUE"
+        )
+        .fetch_all(pool.get_ref())
+        .await {
+            Ok(users) => users,
+            Err(_) => continue,
+        };
+
+        for user in expired_users {
+            // Удалить из Xray
+            let _ = client.delete(&format!("{}/users/{}@vpn.com", XRAY_API_URL, user.uuid))
+                .send()
+                .await;
+
+            // Обновить статус в БД
+            let _ = sqlx::query!(
+                "UPDATE users SET is_active = FALSE WHERE uuid = $1",
+                user.uuid
+            )
+            .execute(pool.get_ref())
+            .await;
+        }
     }
 }
 
@@ -80,6 +146,12 @@ async fn main() -> std::io::Result<()> {
         .connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
+
+    // Запустить фоновую задачу
+    let pool_clone = pool.clone();
+    tokio::spawn(async move {
+        cleanup_task(web::Data::new(pool_clone)).await
+    });
 
     HttpServer::new(move || {
         App::new()
