@@ -65,6 +65,32 @@ async fn create_user(
     HttpResponse::Ok().json(user)
 }
 
+// Получить пользователя по UUID
+async fn get_user(
+    pool: web::Data<PgPool>,
+    uuid: web::Path<String>,
+) -> HttpResponse {
+    // Проверка формата UUID
+    let uuid = match Uuid::parse_str(&uuid) {
+        Ok(uuid) => uuid,
+        Err(_) => return HttpResponse::BadRequest().body("Invalid UUID format"),
+    };
+
+    // Поиск пользователя в БД
+    match sqlx::query_as!(
+        User,
+        "SELECT * FROM users WHERE uuid = $1",
+        uuid.to_string()
+    )
+    .fetch_optional(pool.get_ref())
+    .await
+    {
+        Ok(Some(user)) => HttpResponse::Ok().json(user),
+        Ok(None) => HttpResponse::NotFound().finish(),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
 // Продлить подписку
 async fn extend_subscription(
     pool: web::Data<PgPool>,
