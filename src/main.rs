@@ -110,7 +110,7 @@ async fn extend_subscription(
         WHERE uuid = $2
         RETURNING *
         "#,
-        *days as i32,
+        days.0 as i32,
         uuid
     )
     .fetch_one(pool.get_ref())
