@@ -1,5 +1,6 @@
 use actix_web::{web, App, HttpResponse, HttpServer};
 use reqwest::Client;
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -15,7 +16,7 @@ async fn create_user(
     pool: web::Data<PgPool>,
     data: web::Json<NewUser>,
 ) -> HttpResponse {
-    let uuid = Uuid::new_v4().to_string();
+    let uuid = Uuid::new_v4();
     let client = Client::new();
 
     // Начать транзакцию
@@ -28,13 +29,14 @@ async fn create_user(
     let user = match sqlx::query_as!(
         User,
         r#"
-        INSERT INTO users (telegram_id, uuid, subscription_end, is_active)
-        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', TRUE)
+        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at)
+        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', TRUE, $4)
         RETURNING *
         "#,
         data.telegram_id,
         uuid,
-        data.subscription_days as i32
+        data.subscription_days as i32,
+        Utc::now()
     )
     .fetch_one(&mut *tx)
     .await {
@@ -98,7 +100,10 @@ async fn extend_subscription(
     days: web::Json<u32>,
 ) -> HttpResponse {
     let client = Client::new();
-    let uuid = uuid.into_inner();
+    let uuid = match Uuid::parse_str(&uuid) {
+        Ok(uuid) => uuid,
+        Err(_) => return HttpResponse::BadRequest().body("Invalid UUID"),
+    };
 
     // Обновить в БД
     let result = match sqlx::query!(

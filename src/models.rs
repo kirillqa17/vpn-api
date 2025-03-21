@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use chrono;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 
@@ -10,6 +10,7 @@ pub struct User {
     pub uuid: Uuid,
     pub subscription_end: Option<chrono::DateTime<chrono::Utc>>,
     pub is_active: bool,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
