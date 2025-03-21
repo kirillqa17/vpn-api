@@ -1,6 +1,6 @@
 use actix_web::{web, App, HttpResponse, HttpServer};
 use reqwest::Client;
-use chrono::{DateTime, Utc};
+use chrono::Utc;  // Убрали неиспользуемый DateTime
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -19,13 +19,12 @@ async fn create_user(
     let uuid = Uuid::new_v4();
     let client = Client::new();
 
-    // Начать транзакцию
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
-    // Добавить в БД
+    // Исправлен запрос - убраны явные преобразования типов
     let user = match sqlx::query_as!(
         User,
         r#"
@@ -44,7 +43,6 @@ async fn create_user(
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
-    // Добавить в Xray
     let xray_response = client.post(&format!("{}/users", XRAY_API_URL))
         .json(&json!({
             "email": format!("{}@vpn.com", uuid),
@@ -59,12 +57,11 @@ async fn create_user(
         return HttpResponse::InternalServerError().body(format!("Xray API error: {}", e));
     }
 
-    // Завершить транзакцию
     if let Err(e) = tx.commit().await {
         return HttpResponse::InternalServerError().body(e.to_string());
     }
 
-    HttpResponse::Ok().json::<User>(user)
+    HttpResponse::Ok().json(user)  // Убрали явное указание типа
 }
 
 // Получить пользователя по UUID
@@ -72,17 +69,16 @@ async fn get_user(
     pool: web::Data<PgPool>,
     uuid: web::Path<String>,
 ) -> HttpResponse {
-    // Проверка формата UUID
     let uuid = match Uuid::parse_str(&uuid) {
         Ok(uuid) => uuid,
         Err(_) => return HttpResponse::BadRequest().body("Invalid UUID format"),
     };
 
-    // Поиск пользователя в БД
+    // Исправлен запрос - передаем Uuid вместо строки
     match sqlx::query_as!(
         User,
         "SELECT * FROM users WHERE uuid = $1",
-        uuid.to_string()
+        uuid
     )
     .fetch_optional(pool.get_ref())
     .await
@@ -105,8 +101,9 @@ async fn extend_subscription(
         Err(_) => return HttpResponse::BadRequest().body("Invalid UUID"),
     };
 
-    // Обновить в БД
-    let result = match sqlx::query!(
+    // Исправлено использование query_as! вместо query!
+    let result = match sqlx::query_as!(
+        User,
         r#"
         UPDATE users 
         SET subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day'
@@ -122,7 +119,6 @@ async fn extend_subscription(
         Err(_) => return HttpResponse::NotFound().finish(),
     };
 
-    // Обновить в Xray (добавить если был удален)
     let _ = client.post(&format!("{}/users", XRAY_API_URL))
         .json(&json!({
             "email": format!("{}@vpn.com", uuid),
@@ -132,7 +128,7 @@ async fn extend_subscription(
         .send()
         .await;
 
-    HttpResponse::Ok().json::<User>(result)
+    HttpResponse::Ok().json(result)  // Убрали явное указание типа
 }
 
 // Фоновая задача для очистки
