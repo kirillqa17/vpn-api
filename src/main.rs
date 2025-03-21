@@ -62,7 +62,7 @@ async fn create_user(
         return HttpResponse::InternalServerError().body(e.to_string());
     }
 
-    HttpResponse::Ok().json(user)
+    HttpResponse::Ok().json::<User>(user)
 }
 
 // Получить пользователя по UUID
@@ -127,7 +127,7 @@ async fn extend_subscription(
         .send()
         .await;
 
-    HttpResponse::Ok().json(result)
+    HttpResponse::Ok().json::<User>(result)
 }
 
 // Фоновая задача для очистки
@@ -150,7 +150,7 @@ async fn cleanup_task(pool: web::Data<PgPool>) {
 
         for user in expired_users {
             // Удалить из Xray
-            let _ = client.delete(&format!("{}/users/{}@vpn.com", XRAY_API_URL, user.uuid))
+            let _ = client.delete(&format!("{}/users/{}@vpn.com", XRAY_API_URL, user.uuid.to_string()))
                 .send()
                 .await;
 
