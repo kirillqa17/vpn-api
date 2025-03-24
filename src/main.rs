@@ -62,6 +62,19 @@ async fn create_user(
     HttpResponse::Ok().json(user) 
 }
 
+// Получить всех пользователей
+async fn list_users(pool: web::Data<PgPool>) -> HttpResponse {
+    let users = match sqlx::query_as!(User, "SELECT * FROM users")
+        .fetch_all(pool.get_ref())
+        .await
+    {
+        Ok(users) => users,
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    HttpResponse::Ok().json(users)
+}
+
 // Получить пользователя по UUID
 async fn get_user(
     pool: web::Data<PgPool>,
@@ -180,6 +193,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(pool.clone()))
             .service(
                 web::resource("/users")
+                    .route(web::get().to(list_users))
                     .route(web::post().to(create_user)),
             )
             .service(
