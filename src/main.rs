@@ -1,6 +1,6 @@
 use actix_web::{web, App, HttpResponse, HttpServer};
 use reqwest::Client;
-use chrono::Utc;  // Убрали неиспользуемый DateTime
+use chrono::Utc;  
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -11,7 +11,6 @@ use models::{User, NewUser};
 
 const XRAY_API_URL: &str = "http://localhost:62789/api";
 
-// Создать пользователя
 async fn create_user(
     pool: web::Data<PgPool>,
     data: web::Json<NewUser>,
@@ -24,7 +23,6 @@ async fn create_user(
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
-    // Исправлен запрос - убраны явные преобразования типов
     let user = match sqlx::query_as!(
         User,
         r#"
@@ -61,7 +59,7 @@ async fn create_user(
         return HttpResponse::InternalServerError().body(e.to_string());
     }
 
-    HttpResponse::Ok().json(user)  // Убрали явное указание типа
+    HttpResponse::Ok().json(user) 
 }
 
 // Получить пользователя по UUID
@@ -74,7 +72,6 @@ async fn get_user(
         Err(_) => return HttpResponse::BadRequest().body("Invalid UUID format"),
     };
 
-    // Исправлен запрос - передаем Uuid вместо строки
     match sqlx::query_as!(
         User,
         "SELECT * FROM users WHERE uuid = $1",
@@ -89,7 +86,6 @@ async fn get_user(
     }
 }
 
-// Продлить подписку
 async fn extend_subscription(
     pool: web::Data<PgPool>,
     uuid: web::Path<String>,
@@ -101,7 +97,6 @@ async fn extend_subscription(
         Err(_) => return HttpResponse::BadRequest().body("Invalid UUID"),
     };
 
-    // Исправлено использование query_as! вместо query!
     let result = match sqlx::query_as!(
         User,
         r#"
@@ -128,7 +123,7 @@ async fn extend_subscription(
         .send()
         .await;
 
-    HttpResponse::Ok().json(result)  // Убрали явное указание типа
+    HttpResponse::Ok().json(result)
 }
 
 // Фоновая задача для очистки
@@ -141,7 +136,7 @@ async fn cleanup_task(pool: web::Data<PgPool>) {
         
         // Получить просроченных пользователей
         let expired_users = match sqlx::query!(
-            "SELECT uuid FROM users WHERE subscription_end < NOW() AND is_active = TRUE"
+            "SELECT uuid FROM users WHERE subscription_end < NOW() OR is_active = TRUE"
         )
         .fetch_all(pool.get_ref())
         .await {
