@@ -4,19 +4,55 @@ use chrono::Utc;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
+use std::fs;
+use std::process::Command;
+use serde_json::Value;
 use std::time::Duration;
 
 mod models;
 use models::{User, NewUser};
 
-const XRAY_API_URL: &str = "http://localhost:62789/api";
+
+const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
+
+fn update_xray_config(uuid: &str) -> Result<(), String> {
+    // Читаем текущий конфиг
+    let config_data = fs::read_to_string(XRAY_CONFIG_PATH)
+        .map_err(|e| format!("Ошибка чтения конфигурации: {}", e))?;
+    
+    let mut config: Value = serde_json::from_str(&config_data)
+        .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
+
+    // Ищем inbound с тегом "your-inbound-tag"
+    if let Some(inbounds) = config["inbounds"].as_array_mut() {
+        for inbound in inbounds {
+            if inbound["tag"] == "vless-inbound" {
+                if let Some(clients) = inbound["settings"]["clients"].as_array_mut() {
+                    clients.push(json!({ "id": uuid }));
+                }
+            }
+        }
+    }
+
+    // Записываем обновленный конфиг
+    fs::write(XRAY_CONFIG_PATH, serde_json::to_string_pretty(&config).unwrap())
+        .map_err(|e| format!("Ошибка записи конфигурации: {}", e))?;
+
+    // Отправляем SIGHUP процессу Xray
+    Command::new("pkill")
+        .arg("-HUP")
+        .arg("xray")
+        .output()
+        .map_err(|e| format!("Ошибка при отправке SIGHUP: {}", e))?;
+
+    Ok(())
+}
 
 async fn create_user(
     pool: web::Data<PgPool>,
     data: web::Json<NewUser>,
 ) -> HttpResponse {
     let uuid = Uuid::new_v4();
-    let client = Client::new();
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -41,18 +77,12 @@ async fn create_user(
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
-    let xray_response = client.post(&format!("{}/users", XRAY_API_URL))
-        .json(&json!({
-            "email": format!("{}@vpn.com", uuid),
-            "uuid": uuid,
-            "inboundTag": "your-inbound-tag"
-        }))
-        .send()
-        .await;
-
-    if let Err(e) = xray_response {
-        let _ = tx.rollback().await;
-        return HttpResponse::InternalServerError().body(format!("Xray API error: {}", e));
+    match update_xray_config( &uuid.to_string()) {
+        Ok(_) => (),
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return HttpResponse::InternalServerError().body(format!("Xray конфиг ошибка: {}", e));
+        }
     }
 
     if let Err(e) = tx.commit().await {
