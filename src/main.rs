@@ -166,43 +166,43 @@ async fn extend_subscription(
     //     .send()
     //     .await;
 
-    // HttpResponse::Ok().json(result)
+    HttpResponse::Ok().json(result)
 }
 
-// Фоновая задача для очистки
-// async fn cleanup_task(pool: web::Data<PgPool>) {
-//     let client = Client::new();
-//     let mut interval = tokio::time::interval(Duration::from_secs(3600)); // Каждый час
+Фоновая задача для очистки
+async fn cleanup_task(pool: web::Data<PgPool>) {
+    let client = Client::new();
+    let mut interval = tokio::time::interval(Duration::from_secs(3600)); // Каждый час
     
-//     loop {
-//         interval.tick().await;
+    // loop {
+    //     interval.tick().await;
         
-//         // Получить просроченных пользователей
-//         let expired_users = match sqlx::query!(
-//             "SELECT uuid FROM users WHERE subscription_end < NOW() OR is_active = TRUE"
-//         )
-//         .fetch_all(pool.get_ref())
-//         .await {
-//             Ok(users) => users,
-//             Err(_) => continue,
-//         };
+    //     // Получить просроченных пользователей
+    //     let expired_users = match sqlx::query!(
+    //         "SELECT uuid FROM users WHERE subscription_end < NOW() OR is_active = TRUE"
+    //     )
+    //     .fetch_all(pool.get_ref())
+    //     .await {
+    //         Ok(users) => users,
+    //         Err(_) => continue,
+    //     };
 
-//         for user in expired_users {
-//             // Удалить из Xray
-//             let _ = client.delete(&format!("{}/users/{}@vpn.com", XRAY_API_URL, user.uuid.to_string()))
-//                 .send()
-//                 .await;
+    //     for user in expired_users {
+    //         // Удалить из Xray
+    //         let _ = client.delete(&format!("{}/users/{}@vpn.com", XRAY_API_URL, user.uuid.to_string()))
+    //             .send()
+    //             .await;
 
-//             // Обновить статус в БД
-//             let _ = sqlx::query!(
-//                 "UPDATE users SET is_active = FALSE WHERE uuid = $1",
-//                 user.uuid
-//             )
-//             .execute(pool.get_ref())
-//             .await;
-//         }
-//     }
-// }
+    //         // Обновить статус в БД
+    //         let _ = sqlx::query!(
+    //             "UPDATE users SET is_active = FALSE WHERE uuid = $1",
+    //             user.uuid
+    //         )
+    //         .execute(pool.get_ref())
+    //         .await;
+    //     }
+    // }
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
