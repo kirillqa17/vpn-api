@@ -169,7 +169,6 @@ async fn extend_subscription(
     HttpResponse::Ok().json(result)
 }
 
-Фоновая задача для очистки
 async fn cleanup_task(pool: web::Data<PgPool>) {
     let client = Client::new();
     let mut interval = tokio::time::interval(Duration::from_secs(3600)); // Каждый час
