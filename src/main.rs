@@ -1,6 +1,5 @@
 use actix_web::{web, App, HttpResponse, HttpServer};
-use reqwest::Client;
-use chrono::Utc;  
+use chrono::Utc;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -12,18 +11,15 @@ use std::time::Duration;
 mod models;
 use models::{User, NewUser};
 
-
 const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
 
 fn update_xray_config(uuid: &str) -> Result<(), String> {
-    // Читаем текущий конфиг
     let config_data = fs::read_to_string(XRAY_CONFIG_PATH)
         .map_err(|e| format!("Ошибка чтения конфигурации: {}", e))?;
     
     let mut config: Value = serde_json::from_str(&config_data)
         .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
 
-    // Ищем inbound с тегом "your-inbound-tag"
     if let Some(inbounds) = config["inbounds"].as_array_mut() {
         for inbound in inbounds {
             if inbound["tag"] == "vless-inbound" {
@@ -34,11 +30,9 @@ fn update_xray_config(uuid: &str) -> Result<(), String> {
         }
     }
 
-    // Записываем обновленный конфиг
     fs::write(XRAY_CONFIG_PATH, serde_json::to_string_pretty(&config).unwrap())
         .map_err(|e| format!("Ошибка записи конфигурации: {}", e))?;
 
-    // Отправляем SIGHUP процессу Xray
     Command::new("pkill")
         .arg("-HUP")
         .arg("xray")
@@ -48,10 +42,36 @@ fn update_xray_config(uuid: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn create_user(
-    pool: web::Data<PgPool>,
-    data: web::Json<NewUser>,
-) -> HttpResponse {
+fn remove_user_from_xray_config(uuid: &str) -> Result<(), String> {
+    let config_data = fs::read_to_string(XRAY_CONFIG_PATH)
+        .map_err(|e| format!("Ошибка чтения конфигурации: {}", e))?;
+
+    let mut config: Value = serde_json::from_str(&config_data)
+        .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
+
+    if let Some(inbounds) = config["inbounds"].as_array_mut() {
+        for inbound in inbounds {
+            if inbound["tag"] == "vless-inbound" {
+                if let Some(clients) = inbound["settings"]["clients"].as_array_mut() {
+                    clients.retain(|client| client["id"] != uuid);
+                }
+            }
+        }
+    }
+
+    fs::write(XRAY_CONFIG_PATH, serde_json::to_string_pretty(&config).unwrap())
+        .map_err(|e| format!("Ошибка записи конфигурации: {}", e))?;
+
+    Command::new("pkill")
+        .arg("-HUP")
+        .arg("xray")
+        .output()
+        .map_err(|e| format!("Ошибка при отправке SIGHUP: {}", e))?;
+
+    Ok(())
+}
+
+async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
     let uuid = Uuid::new_v4();
 
     let mut tx = match pool.begin().await {
@@ -77,22 +97,18 @@ async fn create_user(
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
-    match update_xray_config( &uuid.to_string()) {
-        Ok(_) => (),
-        Err(e) => {
-            let _ = tx.rollback().await;
-            return HttpResponse::InternalServerError().body(format!("Xray конфиг ошибка: {}", e));
-        }
+    if let Err(e) = update_xray_config(&uuid.to_string()) {
+        let _ = tx.rollback().await;
+        return HttpResponse::InternalServerError().body(format!("Xray конфиг ошибка: {}", e));
     }
 
     if let Err(e) = tx.commit().await {
         return HttpResponse::InternalServerError().body(e.to_string());
     }
 
-    HttpResponse::Ok().json(user) 
+    HttpResponse::Ok().json(user)
 }
 
-// Получить всех пользователей
 async fn list_users(pool: web::Data<PgPool>) -> HttpResponse {
     let users = match sqlx::query_as!(User, "SELECT * FROM users")
         .fetch_all(pool.get_ref())
@@ -105,36 +121,7 @@ async fn list_users(pool: web::Data<PgPool>) -> HttpResponse {
     HttpResponse::Ok().json(users)
 }
 
-// Получить пользователя по UUID
-async fn get_user(
-    pool: web::Data<PgPool>,
-    uuid: web::Path<String>,
-) -> HttpResponse {
-    let uuid = match Uuid::parse_str(&uuid) {
-        Ok(uuid) => uuid,
-        Err(_) => return HttpResponse::BadRequest().body("Invalid UUID format"),
-    };
-
-    match sqlx::query_as!(
-        User,
-        "SELECT * FROM users WHERE uuid = $1",
-        uuid
-    )
-    .fetch_optional(pool.get_ref())
-    .await
-    {
-        Ok(Some(user)) => HttpResponse::Ok().json(user),
-        Ok(None) => HttpResponse::NotFound().finish(),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
-    }
-}
-
-async fn extend_subscription(
-    pool: web::Data<PgPool>,
-    uuid: web::Path<String>,
-    days: web::Json<u32>,
-) -> HttpResponse {
-    let client = Client::new();
+async fn extend_subscription(pool: web::Data<PgPool>, uuid: web::Path<String>, days: web::Json<u32>) -> HttpResponse {
     let uuid = match Uuid::parse_str(&uuid) {
         Ok(uuid) => uuid,
         Err(_) => return HttpResponse::BadRequest().body("Invalid UUID"),
@@ -157,50 +144,34 @@ async fn extend_subscription(
         Err(_) => return HttpResponse::NotFound().finish(),
     };
 
-    // let _ = client.post(&format!("{}/users", XRAY_API_URL))
-    //     .json(&json!({
-    //         "email": format!("{}@vpn.com", uuid),
-    //         "uuid": uuid,
-    //         "inboundTag": "your-inbound-tag"
-    //     }))
-    //     .send()
-    //     .await;
-
     HttpResponse::Ok().json(result)
 }
 
 async fn cleanup_task(pool: web::Data<PgPool>) {
-    let client = Client::new();
-    let mut interval = tokio::time::interval(Duration::from_secs(3600)); // Каждый час
-    
-    // loop {
-    //     interval.tick().await;
-        
-    //     // Получить просроченных пользователей
-    //     let expired_users = match sqlx::query!(
-    //         "SELECT uuid FROM users WHERE subscription_end < NOW() OR is_active = TRUE"
-    //     )
-    //     .fetch_all(pool.get_ref())
-    //     .await {
-    //         Ok(users) => users,
-    //         Err(_) => continue,
-    //     };
+    let mut interval = tokio::time::interval(Duration::from_secs(3600));
 
-    //     for user in expired_users {
-    //         // Удалить из Xray
-    //         let _ = client.delete(&format!("{}/users/{}@vpn.com", XRAY_API_URL, user.uuid.to_string()))
-    //             .send()
-    //             .await;
+    loop {
+        interval.tick().await;
 
-    //         // Обновить статус в БД
-    //         let _ = sqlx::query!(
-    //             "UPDATE users SET is_active = FALSE WHERE uuid = $1",
-    //             user.uuid
-    //         )
-    //         .execute(pool.get_ref())
-    //         .await;
-    //     }
-    // }
+        let expired_users = match sqlx::query!("SELECT uuid FROM users WHERE subscription_end < NOW() AND is_active = TRUE")
+            .fetch_all(pool.get_ref())
+            .await
+        {
+            Ok(users) => users,
+            Err(_) => continue,
+        };
+
+        for user in expired_users {
+            if let Err(e) = remove_user_from_xray_config(&user.uuid.to_string()) {
+                eprintln!("Ошибка удаления пользователя из Xray: {}", e);
+                continue;
+            }
+
+            let _ = sqlx::query!("UPDATE users SET is_active = FALSE WHERE uuid = $1", user.uuid)
+                .execute(pool.get_ref())
+                .await;
+        }
+    }
 }
 
 #[actix_web::main]
@@ -211,7 +182,6 @@ async fn main() -> std::io::Result<()> {
         .await
         .unwrap();
 
-    // Запустить фоновую задачу
     let pool_clone = pool.clone();
     tokio::spawn(async move {
         cleanup_task(web::Data::new(pool_clone)).await
@@ -224,10 +194,6 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/users")
                     .route(web::get().to(list_users))
                     .route(web::post().to(create_user)),
-            )
-            .service(
-                web::resource("/users/{uuid}")
-                    .route(web::get().to(get_user)),
             )
             .service(
                 web::resource("/users/{uuid}/extend")
