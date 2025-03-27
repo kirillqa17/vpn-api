@@ -71,6 +71,35 @@ fn remove_user_from_xray_config(uuid: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn check_user_in_xray_config(uuid: &str) -> bool {
+    let config_data = match fs::read_to_string(XRAY_CONFIG_PATH) {
+        Ok(data) => data,
+        Err(_) => return false,  // Если не удалось прочитать конфиг, считаем, что пользователя нет
+    };
+
+    let config: Value = match serde_json::from_str(&config_data) {
+        Ok(config) => config,
+        Err(_) => return false,  // Если не удалось распарсить JSON, считаем, что пользователя нет
+    };
+
+    if let Some(inbounds) = config["inbounds"].as_array() {
+        for inbound in inbounds {
+            if inbound["tag"] == "vless-inbound" {
+                if let Some(clients) = inbound["settings"]["clients"].as_array() {
+                    for client in clients {
+                        if client["id"] == uuid {
+                            return true;  // Пользователь найден в конфиге
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false  // Если пользователь не найден
+}
+
+
 async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
     let uuid = Uuid::new_v4();
     let referral_id = data.referral_id; // Получаем ID пригласившего пользователя
@@ -175,6 +204,10 @@ async fn extend_subscription(pool: web::Data<PgPool>, uuid: web::Path<String>, d
         Err(_) => return HttpResponse::BadRequest().body("Invalid UUID"),
     };
 
+    // Проверяем, существует ли пользователь в конфиге Xray
+    let user_exists_in_config = check_user_in_xray_config(&uuid.to_string());
+
+    // Обновляем срок подписки
     let result = match sqlx::query_as!(
         User,
         r#"
@@ -192,8 +225,16 @@ async fn extend_subscription(pool: web::Data<PgPool>, uuid: web::Path<String>, d
         Err(_) => return HttpResponse::NotFound().finish(),
     };
 
+    // Если пользователь не был в конфиге Xray, добавляем его обратно
+    if !user_exists_in_config {
+        if let Err(e) = update_xray_config(&uuid.to_string()) {
+            return HttpResponse::InternalServerError().body(format!("Xray конфиг ошибка: {}", e));
+        }
+    }
+
     HttpResponse::Ok().json(result)
 }
+
 
 async fn get_referral_id(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> HttpResponse {
     let result = match sqlx::query!(
