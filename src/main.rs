@@ -83,7 +83,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         User,
         r#"
         INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at)
-        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', TRUE, $4)
+        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 1, $4)
         RETURNING *
         "#,
         data.telegram_id,
@@ -153,7 +153,7 @@ async fn cleanup_task(pool: web::Data<PgPool>) {
     loop {
         interval.tick().await;
 
-        let expired_users = match sqlx::query!("SELECT uuid FROM users WHERE subscription_end < NOW() AND is_active = TRUE")
+        let expired_users = match sqlx::query!("SELECT uuid FROM users WHERE subscription_end < NOW() AND is_active = 1")
             .fetch_all(pool.get_ref())
             .await
         {
@@ -167,7 +167,7 @@ async fn cleanup_task(pool: web::Data<PgPool>) {
                 continue;
             }
 
-            let _ = sqlx::query!("UPDATE users SET is_active = FALSE WHERE uuid = $1", user.uuid)
+            let _ = sqlx::query!("UPDATE users SET is_active = 0 WHERE uuid = $1", user.uuid)
                 .execute(pool.get_ref())
                 .await;
         }
