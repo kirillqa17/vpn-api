@@ -276,6 +276,26 @@ async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>)
     result
 }
 
+async fn get_referrals_count(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> HttpResponse {
+    // Выполняем запрос, чтобы получить количество пользователей, которые были приглашены этим пользователем
+    let count = match sqlx::query!(
+        r#"
+        SELECT COUNT(*) AS count
+        FROM users
+        WHERE referral_id = $1
+        "#,
+        telegram_id.into_inner()
+    )
+    .fetch_one(pool.get_ref())
+    .await
+    {
+        Ok(record) => record.count.unwrap_or(0), // Если значение count не присутствует, возвращаем 0
+        Err(_) => return HttpResponse::InternalServerError().body("Error fetching referral count"),
+    };
+
+    // Возвращаем количество рефералов в ответе
+    HttpResponse::Ok().json(json!({ "referrals_count": count }))
+}
 
 
 #[actix_web::main]
@@ -305,6 +325,7 @@ async fn main() -> std::io::Result<()> {
             )
             .service(web::resource("/users/{telegram_id}/referral_id").route(web::get().to(get_referral_id)))
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
+            .service(web::resource("/users/{telegram_id}/referrals_count").route(web::get().to(get_referrals_count)))
     })
     .bind("0.0.0.0:8080")?
     .run()
