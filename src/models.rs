@@ -11,10 +11,19 @@ pub struct User {
     pub subscription_end: DateTime<Utc>,
     pub is_active: i16,
     pub created_at: DateTime<Utc>,
+    pub referrals: Option<Vec<i64>>,  
+    pub referral_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NewUser {
     pub telegram_id: Option<i64>,
     pub subscription_days: u32,
+    pub referral_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddReferralData {
+    pub referral_id: i64,          // telegram_id пригласившего пользователя
+    pub referred_telegram_id: i64, // telegram_id приглашаемого пользователя
 }

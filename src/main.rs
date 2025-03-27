@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 mod models;
-use models::{User, NewUser};
+use models::{User, NewUser, AddReferralData};
 
 const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
 
@@ -73,23 +73,26 @@ fn remove_user_from_xray_config(uuid: &str) -> Result<(), String> {
 
 async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
     let uuid = Uuid::new_v4();
+    let referral_id = data.referral_id; // Получаем ID пригласившего пользователя
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
+    // Добавляем нового пользователя в таблицу
     let user = match sqlx::query_as!(
         User,
         r#"
-        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at)
-        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 1, $4)
+        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id)
+        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 1, $4, $5)
         RETURNING *
         "#,
         data.telegram_id,
         uuid,
         data.subscription_days as i32,
-        Utc::now()
+        Utc::now(),
+        referral_id
     )
     .fetch_one(&mut *tx)
     .await {
@@ -97,16 +100,61 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
+    // Если у пользователя есть реферал, добавляем его telegram_id в массив рефералов
+    if let Some(referral_id) = referral_id {
+        let _ = sqlx::query!(
+            r#"
+            UPDATE users 
+            SET referrals = array_append(referrals, $1)
+            WHERE telegram_id = $2
+            "#,
+            user.telegram_id,
+            referral_id
+        )
+        .execute(&mut *tx)
+        .await;
+    }
+
+    // Обновляем Xray конфигурацию с новым пользователем
     if let Err(e) = update_xray_config(&uuid.to_string()) {
         let _ = tx.rollback().await;
         return HttpResponse::InternalServerError().body(format!("Xray конфиг ошибка: {}", e));
     }
 
+    // Если все прошло успешно, коммитим транзакцию
     if let Err(e) = tx.commit().await {
         return HttpResponse::InternalServerError().body(e.to_string());
     }
 
     HttpResponse::Ok().json(user)
+}
+
+
+async fn cleanup_task(pool: web::Data<PgPool>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(3600));
+
+    loop {
+        interval.tick().await;
+
+        let expired_users = match sqlx::query!("SELECT uuid FROM users WHERE subscription_end < NOW() AND is_active = 1")
+            .fetch_all(pool.get_ref())
+            .await
+        {
+            Ok(users) => users,
+            Err(_) => continue,
+        };
+
+        for user in expired_users {
+            if let Err(e) = remove_user_from_xray_config(&user.uuid.to_string()) {
+                eprintln!("Ошибка удаления пользователя из Xray: {}", e);
+                continue;
+            }
+
+            let _ = sqlx::query!("UPDATE users SET is_active = 0 WHERE uuid = $1", user.uuid)
+                .execute(pool.get_ref())
+                .await;
+        }
+    }
 }
 
 async fn list_users(pool: web::Data<PgPool>) -> HttpResponse {
@@ -147,32 +195,65 @@ async fn extend_subscription(pool: web::Data<PgPool>, uuid: web::Path<String>, d
     HttpResponse::Ok().json(result)
 }
 
-async fn cleanup_task(pool: web::Data<PgPool>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(3600));
+async fn get_referral_id(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> HttpResponse {
+    let referral = match sqlx::query!(
+        r#"
+        SELECT referral_id FROM users WHERE telegram_id = $1
+        "#,
+        telegram_id.into_inner()
+    )
+    .fetch_one(pool.get_ref())
+    .await
+    {
+        Ok(record) => record,
+        Err(_) => return HttpResponse::NotFound().body("Referral not found"),
+    };
 
-    loop {
-        interval.tick().await;
-
-        let expired_users = match sqlx::query!("SELECT uuid FROM users WHERE subscription_end < NOW() AND is_active = 1")
-            .fetch_all(pool.get_ref())
-            .await
-        {
-            Ok(users) => users,
-            Err(_) => continue,
-        };
-
-        for user in expired_users {
-            if let Err(e) = remove_user_from_xray_config(&user.uuid.to_string()) {
-                eprintln!("Ошибка удаления пользователя из Xray: {}", e);
-                continue;
-            }
-
-            let _ = sqlx::query!("UPDATE users SET is_active = 0 WHERE uuid = $1", user.uuid)
-                .execute(pool.get_ref())
-                .await;
-        }
-    }
+    HttpResponse::Ok().json(referral)
 }
+
+async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>) -> HttpResponse {
+    let referral_id = data.referral_id;
+    let referred_telegram_id = data.referred_telegram_id;
+
+    // Проверяем, что пользователь еще не был приглашен кем-либо
+    let existing_referral = match sqlx::query!(
+        r#"
+        SELECT referral_id FROM users WHERE telegram_id = $1
+        "#,
+        referred_telegram_id
+    )
+    .fetch_one(pool.get_ref())
+    .await
+    {
+        Ok(record) => record,
+        Err(_) => return HttpResponse::BadRequest().body("This user has already been invited"),
+    };
+
+    if existing_referral.referral_id.is_some() {
+        return HttpResponse::BadRequest().body("This user has already been invited by someone else");
+    }
+
+    // Обновляем пользователя, добавляем в массив рефералов
+    let result = match sqlx::query!(
+        r#"
+        UPDATE users 
+        SET referrals = array_append(referrals, $1)
+        WHERE telegram_id = $2
+        "#,
+        referred_telegram_id,
+        referral_id
+    )
+    .execute(pool.get_ref())
+    .await
+    {
+        Ok(_) => HttpResponse::Ok().body("Referral added successfully"),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e)),
+    };
+
+    result
+}
+
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -199,6 +280,8 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/users/{uuid}/extend")
                     .route(web::patch().to(extend_subscription)),
             )
+            .service(web::resource("/users/{telegram_id}/referral_id").route(web::get().to(get_referral_id)))
+            .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
     })
     .bind("0.0.0.0:8080")?
     .run()
