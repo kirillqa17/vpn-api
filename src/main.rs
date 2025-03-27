@@ -209,6 +209,7 @@ async fn get_referral_id(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -
         Err(_) => return HttpResponse::NotFound().body("Referral not found"),
     };
 
+    
     let response = ReferralResponse {
         referral_id: result.referral_id,
     };
@@ -234,6 +235,7 @@ async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>)
         Err(_) => return HttpResponse::BadRequest().body("This user has already been invited"),
     };
 
+    // Если у пользователя уже есть referral_id, значит он уже был приглашен
     if existing_referral.referral_id.is_some() {
         return HttpResponse::BadRequest().body("This user has already been invited by someone else");
     }
@@ -251,12 +253,29 @@ async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>)
     .execute(pool.get_ref())
     .await
     {
-        Ok(_) => HttpResponse::Ok().body("Referral added successfully"),
-        Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e)),
+        Ok(_) => {
+            // Теперь обновляем referral_id для пользователя, которого пригласили
+            match sqlx::query!(
+                r#"
+                UPDATE users
+                SET referral_id = $1
+                WHERE telegram_id = $2
+                "#,
+                referral_id,
+                referred_telegram_id
+            )
+            .execute(pool.get_ref())
+            .await {
+                Ok(_) => HttpResponse::Ok().body("Referral added successfully and referral_id updated"),
+                Err(e) => HttpResponse::InternalServerError().body(format!("Error updating referral_id: {}", e)),
+            }
+        },
+        Err(e) => HttpResponse::InternalServerError().body(format!("Error adding referral: {}", e)),
     };
 
     result
 }
+
 
 
 #[actix_web::main]
