@@ -9,7 +9,7 @@ pub struct User {
     pub telegram_id: i64,
     pub uuid: Uuid,
     pub subscription_end: DateTime<Utc>,
-    pub is_active: i16,
+    pub is_active: i8,
     pub created_at: DateTime<Utc>,
 }
 
