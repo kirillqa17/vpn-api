@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 mod models;
-use models::{User, NewUser, AddReferralData};
+use models::{User, NewUser, AddReferralData, ReferralResponse};
 
 const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
 
@@ -196,7 +196,7 @@ async fn extend_subscription(pool: web::Data<PgPool>, uuid: web::Path<String>, d
 }
 
 async fn get_referral_id(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> HttpResponse {
-    let referral = match sqlx::query!(
+    let result = match sqlx::query!(
         r#"
         SELECT referral_id FROM users WHERE telegram_id = $1
         "#,
@@ -209,7 +209,11 @@ async fn get_referral_id(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -
         Err(_) => return HttpResponse::NotFound().body("Referral not found"),
     };
 
-    HttpResponse::Ok().json(referral)
+    let response = ReferralResponse {
+        referral_id: result.referral_id,
+    };
+
+    HttpResponse::Ok().json(response)
 }
 
 async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>) -> HttpResponse {
