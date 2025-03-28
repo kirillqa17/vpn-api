@@ -1,7 +1,6 @@
 use actix_web::{web, App, HttpResponse, HttpServer};
-use chrono::Utc;
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use std::fs;
 use std::process::Command;
@@ -348,22 +347,16 @@ async fn main() -> std::io::Result<()> {
         .await
         .unwrap();
 
-    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())
-        .expect("Failed to create SSL acceptor");
+    // Настройка SSL
+    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+    builder.set_private_key_file("certs/privkey.pem", SslFiletype::PEM)?;
+    builder.set_certificate_chain_file("certs/fullchain.pem")?;
+
 
     let pool_clone = pool.clone();
     tokio::spawn(async move {
         cleanup_task(web::Data::new(pool_clone)).await
     });
-
-     // Загружаем сертификаты
-    builder
-        .set_private_key_file("certs/privkey.pem", SslFiletype::PEM)
-        .expect("Failed to set private key");
- 
-    builder
-        .set_certificate_chain_file("certs/fullchain.pem")
-        .expect("Failed to set certificate chain");
 
     HttpServer::new(move || {
         App::new()
