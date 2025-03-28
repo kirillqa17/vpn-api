@@ -381,7 +381,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/referrals_count").route(web::get().to(get_referrals_count)))
     })
-    .bind("0.0.0.0:443")?
+    .bind_openssl("0.0.0.0:443", builder)?
     .run()
     .await
 }
