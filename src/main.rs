@@ -7,6 +7,7 @@ use std::fs;
 use std::process::Command;
 use serde_json::Value;
 use std::time::Duration;
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 
 mod models;
 use models::{User, NewUser, AddReferralData, ReferralResponse};
@@ -347,10 +348,22 @@ async fn main() -> std::io::Result<()> {
         .await
         .unwrap();
 
+    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())
+        .expect("Failed to create SSL acceptor");
+
     let pool_clone = pool.clone();
     tokio::spawn(async move {
         cleanup_task(web::Data::new(pool_clone)).await
     });
+
+     // Загружаем сертификаты
+    builder
+        .set_private_key_file("certs/privkey.pem", SslFiletype::PEM)
+        .expect("Failed to set private key");
+ 
+    builder
+        .set_certificate_chain_file("certs/fullchain.pem")
+        .expect("Failed to set certificate chain");
 
     HttpServer::new(move || {
         App::new()
@@ -368,7 +381,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/referrals_count").route(web::get().to(get_referrals_count)))
     })
-    .bind("0.0.0.0:8080")?
+    .bind("0.0.0.0:443")?
     .run()
     .await
 }
