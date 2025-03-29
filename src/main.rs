@@ -17,10 +17,8 @@ const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
 fn update_xray_config(uuid: &str) -> Result<(), String> {
     let config_data = fs::read_to_string(XRAY_CONFIG_PATH)
         .map_err(|e| format!("Ошибка чтения конфигурации: {}", e))?;
-    println!("{}", config_data);
     let mut config: Value = serde_json::from_str(&config_data)
         .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
-
     if let Some(inbounds) = config["inbounds"].as_array_mut() {
         for inbound in inbounds {
             if inbound["tag"] == "vless-inbound" {
