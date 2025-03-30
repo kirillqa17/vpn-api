@@ -144,10 +144,10 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     }
 
     // Обновляем Xray конфигурацию с новым пользователем
-    if let Err(e) = update_xray_config(&uuid.to_string()) {
-        let _ = tx.rollback().await;
-        return HttpResponse::InternalServerError().body(format!("Xray конфиг ошибка: {}", e));
-    }
+    // if let Err(e) = update_xray_config(&uuid.to_string()) {
+    //     let _ = tx.rollback().await;
+    //     return HttpResponse::InternalServerError().body(format!("Xray конфиг ошибка: {}", e));
+    // }
 
     // Если все прошло успешно, коммитим транзакцию
     if let Err(e) = tx.commit().await {
