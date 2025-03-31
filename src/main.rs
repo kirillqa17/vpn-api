@@ -100,15 +100,31 @@ fn check_user_in_xray_config(uuid: &str) -> bool {
 
 
 async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
+    let existing_user = sqlx::query!(
+        "SELECT telegram_id FROM users WHERE telegram_id = $1",
+        data.telegram_id
+    )
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    match existing_user {
+        Ok(Some(_)) => {
+            return HttpResponse::Conflict().body("User with this telegram_id already exists");
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+        _ => {}
+    }
+
     let uuid = Uuid::new_v4();
-    let referral_id = data.referral_id; // Получаем ID пригласившего пользователя
+    let referral_id = data.referral_id;
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
-    // Добавляем нового пользователя в таблицу
     let user = match sqlx::query_as!(
         User,
         r#"
@@ -128,7 +144,6 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
-    // Если у пользователя есть реферал, добавляем его telegram_id в массив рефералов
     if let Some(referral_id) = referral_id {
         let _ = sqlx::query!(
             r#"
@@ -143,19 +158,13 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         .await;
     }
 
-    // Обновляем Xray конфигурацию с новым пользователем
-    // if let Err(e) = update_xray_config(&uuid.to_string()) {
-    //     let _ = tx.rollback().await;
-    //     return HttpResponse::InternalServerError().body(format!("Xray конфиг ошибка: {}", e));
-    // }
-
-    // Если все прошло успешно, коммитим транзакцию
     if let Err(e) = tx.commit().await {
         return HttpResponse::InternalServerError().body(e.to_string());
     }
 
     HttpResponse::Ok().json(user)
 }
+
 
 
 async fn cleanup_task(pool: web::Data<PgPool>) {
