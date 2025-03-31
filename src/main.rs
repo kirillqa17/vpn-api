@@ -129,7 +129,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         User,
         r#"
         INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial)
-        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 1, $4, $5, $6)
+        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6)
         RETURNING *
         "#,
         data.telegram_id,
