@@ -174,7 +174,7 @@ async fn cleanup_task(pool: web::Data<PgPool>) {
     loop {
         interval.tick().await;
 
-        let expired_users = match sqlx::query!("SELECT uuid FROM users WHERE subscription_end < NOW() AND is_active = 1")
+        let expired_users = match sqlx::query!("SELECT uuid FROM users WHERE (subscription_end < NOW() AND is_active = 1) OR is_active = 2")
             .fetch_all(pool.get_ref())
             .await
         {
@@ -349,6 +349,32 @@ async fn get_user_info(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> 
     }
 }
 
+async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::Json<bool>) -> HttpResponse {
+    let is_used_trial = data.into_inner();
+    let telegram_id = telegram_id.into_inner();
+    let result = match sqlx::query!(
+        r#"
+        UPDATE users 
+        SET is_used_trial = $1
+        WHERE telegram_id = $2
+        "#,
+        is_used_trial,
+        telegram_id
+    )
+    .execute(pool.get_ref())
+    .await {
+        Ok(result) => {
+            if result.rows_affected() == 0 {
+                HttpResponse::NotFound().body("User not found")
+            }   
+            else {
+                HttpResponse::Ok().body("Trial status updated successfully")
+            }
+        }
+        Err(_) => HttpResponse::InternalServerError().body("Failed to update trial status")
+    };
+    result
+}
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
@@ -382,6 +408,7 @@ async fn main() -> std::io::Result<()> {
             )
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
+            .service(web::resource("/users/{telegram_id}/trial").route(web::post().to(trial)))
     })
     .bind_openssl("0.0.0.0:443", builder)?
     .run()
