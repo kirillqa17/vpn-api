@@ -206,65 +206,69 @@ async fn list_users(pool: web::Data<PgPool>) -> HttpResponse {
     HttpResponse::Ok().json(users)
 }
 
-async fn extend_subscription(pool: web::Data<PgPool>, uuid: web::Path<String>, days: web::Json<u32>) -> HttpResponse {
-    let uuid = match Uuid::parse_str(&uuid) {
-        Ok(uuid) => uuid,
-        Err(_) => return HttpResponse::BadRequest().body("Invalid UUID"),
-    };
+async fn extend_subscription(
+    pool: web::Data<PgPool>,
+    telegram_id: web::Path<i64>,
+    days: web::Json<u32>,
+) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
 
-    // Проверяем, существует ли пользователь в конфиге Xray
-    let user_exists_in_config = check_user_in_xray_config(&uuid.to_string());
-
-    // Обновляем срок подписки
-    let result = match sqlx::query_as!(
-        User,
-        r#"
-        UPDATE users 
-        SET subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day'
-        WHERE uuid = $2
-        RETURNING *
-        "#,
-        days.0 as i32,
-        uuid
-    )
-    .fetch_one(pool.get_ref())
-    .await {
-        Ok(user) => user,
-        Err(_) => return HttpResponse::NotFound().finish(),
-    };
-
-    // Если пользователь не был в конфиге Xray, добавляем его обратно
-    if !user_exists_in_config {
-        if let Err(e) = update_xray_config(&uuid.to_string()) {
-            return HttpResponse::InternalServerError().body(format!("Xray конфиг ошибка: {}", e));
-        }
-    }
-
-    HttpResponse::Ok().json(result)
-}
-
-
-async fn get_referral_id(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> HttpResponse {
-    let result = match sqlx::query!(
-        r#"
-        SELECT referral_id FROM users WHERE telegram_id = $1
-        "#,
-        telegram_id.into_inner()
+    // Получаем uuid пользователя
+    let user = match sqlx::query!(
+        "SELECT uuid FROM users WHERE telegram_id = $1",
+        telegram_id
     )
     .fetch_one(pool.get_ref())
     .await
     {
         Ok(record) => record,
-        Err(_) => return HttpResponse::NotFound().body("Referral not found"),
+        Err(_) => return HttpResponse::NotFound().body("User not found"),
     };
 
-    
-    let response = ReferralResponse {
-        referral_id: result.referral_id,
-    };
+    let uuid = user.uuid;
 
-    HttpResponse::Ok().json(response)
+    // Проверяем, существует ли пользователь в конфиге Xray
+    let user_exists_in_config = check_user_in_xray_config(&uuid.to_string());
+
+    // Обновляем срок подписки
+    let result = sqlx::query_as!(
+        User,
+        r#"
+        UPDATE users 
+        SET subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day'
+        WHERE telegram_id = $2
+        RETURNING *
+        "#,
+        days.0 as i32,
+        telegram_id
+    )
+    .fetch_one(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(user) => {
+            // Если пользователя не было в конфиге Xray, добавляем его обратно
+            if !user_exists_in_config {
+                if let Err(e) = update_xray_config(&uuid.to_string()) {
+                    return HttpResponse::InternalServerError().body(format!("Xray конфиг ошибка: {}", e));
+                }
+            }
+
+            // Возвращаем полную информацию о пользователе
+            HttpResponse::Ok().json(json!({
+                "telegram_id": user.telegram_id,
+                "uuid": uuid,
+                "subscription_end": user.subscription_end,
+                "is_active": user.is_active,
+                "created_at": user.created_at,
+                "referral_id": user.referral_id,
+                "referrals": user.referrals
+            }))
+        }
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }
 }
+
 
 async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>) -> HttpResponse {
     let referral_id = data.referral_id;
@@ -325,27 +329,24 @@ async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>)
     result
 }
 
-async fn get_referrals_count(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> HttpResponse {
-    // Выполняем запрос, чтобы получить количество пользователей, которые были приглашены этим пользователем
-    let count = match sqlx::query!(
+async fn get_user_info(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+
+    let result = sqlx::query_as!(
+        User,
         r#"
-        SELECT COUNT(*) AS count
-        FROM users
-        WHERE referral_id = $1
+        SELECT * FROM users WHERE telegram_id = $1
         "#,
-        telegram_id.into_inner()
+        telegram_id
     )
     .fetch_one(pool.get_ref())
-    .await
-    {
-        Ok(record) => record.count.unwrap_or(0), // Если значение count не присутствует, возвращаем 0
-        Err(_) => return HttpResponse::InternalServerError().body("Error fetching referral count"),
-    };
+    .await;
 
-    // Возвращаем количество рефералов в ответе
-    HttpResponse::Ok().json(json!({ "referrals_count": count }))
+    match result {
+        Ok(user) => HttpResponse::Ok().json(user),
+        Err(_) => HttpResponse::NotFound().body("User not found"),
+    }
 }
-
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -375,12 +376,11 @@ async fn main() -> std::io::Result<()> {
                     .route(web::post().to(create_user)),
             )
             .service(
-                web::resource("/users/{uuid}/extend")
+                web::resource("/users/{telegram_id}/extend")
                     .route(web::patch().to(extend_subscription)),
             )
-            .service(web::resource("/users/{telegram_id}/referral_id").route(web::get().to(get_referral_id)))
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
-            .service(web::resource("/users/{telegram_id}/referrals_count").route(web::get().to(get_referrals_count)))
+            .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
     })
     .bind_openssl("0.0.0.0:443", builder)?
     .run()
