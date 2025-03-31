@@ -236,7 +236,9 @@ async fn extend_subscription(
         User,
         r#"
         UPDATE users 
-        SET subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day'
+        SET 
+            subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day',
+            is_active = 1
         WHERE telegram_id = $2
         RETURNING *
         "#,
