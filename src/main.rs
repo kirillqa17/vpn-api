@@ -408,7 +408,7 @@ async fn main() -> std::io::Result<()> {
             )
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
-            .service(web::resource("/users/{telegram_id}/trial").route(web::post().to(trial)))
+            .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
     })
     .bind_openssl("0.0.0.0:443", builder)?
     .run()
