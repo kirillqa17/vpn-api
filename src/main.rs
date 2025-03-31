@@ -10,7 +10,7 @@ use std::time::Duration;
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 
 mod models;
-use models::{User, NewUser, AddReferralData, ReferralResponse};
+use models::{User, NewUser, AddReferralData};
 
 const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
 
@@ -128,15 +128,16 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     let user = match sqlx::query_as!(
         User,
         r#"
-        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id)
-        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 1, $4, $5)
+        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial)
+        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 1, $4, $5, $6)
         RETURNING *
         "#,
         data.telegram_id,
         uuid,
         data.subscription_days as i32,
         Utc::now(),
-        referral_id
+        referral_id,
+        false
     )
     .fetch_one(&mut *tx)
     .await {
