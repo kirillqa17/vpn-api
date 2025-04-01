@@ -32,8 +32,8 @@ fn update_xray_config(uuid: &str) -> Result<(), String> {
     fs::write(XRAY_CONFIG_PATH, serde_json::to_string_pretty(&config).unwrap())
         .map_err(|e| format!("Ошибка записи конфигурации: {}", e))?;
 
-    Command::new("pkill")
-        .arg("-HUP")
+    Command::new("systemctl")
+        .arg("restart")
         .arg("xray")
         .output()
         .map_err(|e| format!("Ошибка при отправке SIGHUP: {}", e))?;
@@ -61,8 +61,8 @@ fn remove_user_from_xray_config(uuid: &str) -> Result<(), String> {
     fs::write(XRAY_CONFIG_PATH, serde_json::to_string_pretty(&config).unwrap())
         .map_err(|e| format!("Ошибка записи конфигурации: {}", e))?;
 
-    Command::new("pkill")
-        .arg("-HUP")
+    Command::new("systemctl")
+        .arg("restart")
         .arg("xray")
         .output()
         .map_err(|e| format!("Ошибка при отправке SIGHUP: {}", e))?;
