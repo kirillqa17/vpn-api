@@ -296,6 +296,13 @@ async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>)
         return HttpResponse::BadRequest().body("This user has already been invited by someone else");
     }
 
+    // Проверяем, есть ли уже этот реферал в массиве referrals
+    if let Some(referrals) = existing_referral.referrals {
+        if referrals.contains(&referral_id) {
+            return HttpResponse::BadRequest().body("This referral is already added");
+        }
+    }
+
     // Обновляем пользователя, добавляем в массив рефералов
     let result = match sqlx::query!(
         r#"
