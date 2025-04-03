@@ -404,7 +404,7 @@ async fn result(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::
     let result = match sqlx::query!(
         r#"
         UPDATE users 
-        SET game_result = game_result + $1
+        SET game_points = game_points + $1
         WHERE telegram_id = $2
         "#,
         game_result,
@@ -417,10 +417,10 @@ async fn result(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::
                 HttpResponse::NotFound().body("User not found")
             }   
             else {
-                HttpResponse::Ok().body("Game results updated successfully")
+                HttpResponse::Ok().body("Game points updated successfully")
             }
         }
-        Err(_) => HttpResponse::InternalServerError().body("Failed to update game results")
+        Err(_) => HttpResponse::InternalServerError().body("Failed to update game points")
     };
     result
 }
