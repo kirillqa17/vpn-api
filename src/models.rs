@@ -14,6 +14,7 @@ pub struct User {
     pub referrals: Option<Vec<i64>>,  
     pub referral_id: Option<i64>,
     pub is_used_trial: bool,
+    pub game_points: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
