@@ -398,34 +398,6 @@ async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::J
     result
 }
 
-async fn result(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::Json<i64>) -> HttpResponse {
-    let game_result = data.into_inner();
-    let telegram_id = telegram_id.into_inner();
-    let result = match sqlx::query!(
-        r#"
-        UPDATE users 
-        SET game_points = game_points + $1
-        WHERE telegram_id = $2
-        "#,
-        game_result,
-        telegram_id
-    )
-    .execute(pool.get_ref())
-    .await {
-        Ok(result) => {
-            if result.rows_affected() == 0 {
-                HttpResponse::NotFound().body("User not found")
-            }   
-            else {
-                HttpResponse::Ok().body("Game points updated successfully")
-            }
-        }
-        Err(_) => HttpResponse::InternalServerError().body("Failed to update game points")
-    };
-    result
-}
-
-
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
@@ -460,7 +432,6 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
-            .service(web::resource("/result/{telegram_id}").route(web::post().to(result)))
     })
     .bind_openssl("0.0.0.0:443", builder)?
     .run()
