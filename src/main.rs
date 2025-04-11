@@ -128,7 +128,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     let user = match sqlx::query_as!(
         User,
         r#"
-        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial)
+        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points, is_used_ref_bonus)
         VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6)
         RETURNING *
         "#,
@@ -137,6 +137,8 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         data.subscription_days as i32,
         Utc::now(),
         referral_id,
+        false,
+        0,
         false
     )
     .fetch_one(&mut *tx)
@@ -396,6 +398,34 @@ async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::J
     };
     result
 }
+
+async fn ref_bonus(pool: web::Data<PgPool>, telegram_id: web::Path<i64>, data: web::Json<bool>) -> HttpResponse{
+    let is_used_ref_bonus = data.into_inner();
+    let telegram_id = telegram_id.into_inner();
+    let result = match sqlx::query!(
+        r#"
+        UPDATE users
+        SET is_used_ref_bonus = $1
+        WHERE telegram_id = $2
+        "#,
+        is_used_ref_bonus,
+        telegram_id
+    )
+    .execute(pool.get_ref())
+    .await{
+        Ok(result) => {
+            if result.rows_affected() == 0 {
+                HttpResponse::NotFound().body("User not found")
+            }   
+            else {
+                HttpResponse::Ok().body("Referral bonus status updated successfully")
+            }
+        }
+        Err(_) => HttpResponse::InternalServerError().body("Failed to update referral bonus status")
+    };
+    result
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
@@ -430,6 +460,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
+            .service(web::resource("/users/{telegram_id}/ref_bonus").route(web::patch().to(ref_bonus)))
     })
     .bind_openssl("0.0.0.0:443", builder)?
     .run()
