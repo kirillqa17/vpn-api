@@ -126,7 +126,7 @@ async fn extend_subscription(
         WHERE telegram_id = $2
         RETURNING *
         "#,
-        days.0 as i32,
+        days as i32,
         telegram_id
     )
     .fetch_one(pool.get_ref())
@@ -135,15 +135,15 @@ async fn extend_subscription(
     match result {
         Ok(user) => {
          
-            let other_server_url = match server {
-                "NE".to_string() => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
-                "DE".to_string() => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
+            let other_server_url = match server.as_str() {
+                "NE" => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
+                "DE" => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
                 _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
             };
 
             let client = reqwest::Client::new();
             let response = client.post(&other_server_url)
-                .json(&days.0)
+                .json(&days)
                 .send()
                 .await;
 
@@ -324,7 +324,7 @@ async fn location(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web
         Ok(record) => record,
         Err(_) => return HttpResponse::NotFound().body("User not found"),
     };
-    let prev_server = user.server_location;
+    let prev_server = user.server_location.as_deref().unwrap_or_default();
 
     let other_server_url = match prev_server {
         "NE" => format!("https://svoivpn-ne.duckdns.org/remove/{}", uuid),
@@ -339,28 +339,28 @@ async fn location(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web
 
     match response {
         Ok(resp) if !resp.status().is_success() => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return HttpResponse::InternalServerError().body("Failed to sync with external service");
         },
-        Err(e) => {
+        Err(_e) => {
             return HttpResponse::InternalServerError().body("Failed to connect to external service");
         },
         _ => {}
     }
 
-    let other_server_url = match server {
-        "NE".to_string() => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
-        "DE".to_string() => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
+    let other_server_url = match server.as_str() {
+        "NE" => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
+        "DE" => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
         _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
     };
+    let response = client.post(&other_server_url)
+        .send()
+        .await;
     match response {
         Ok(resp) if !resp.status().is_success() => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+
             return HttpResponse::InternalServerError().body("Failed to sync with external service");
         },
-        Err(e) => {
+        Err(_e) => {
             return HttpResponse::InternalServerError().body("Failed to connect to external service");
         },
         _ => {}
@@ -404,7 +404,6 @@ async fn main() -> std::io::Result<()> {
     builder.set_certificate_chain_file("certs/fullchain.pem")?;
 
 
-    let pool_clone = pool.clone();
 
     HttpServer::new(move || {
         App::new()
