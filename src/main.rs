@@ -49,8 +49,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         false,
         0,
         false,
-        0,
-        "NE".to_string()
+        0
     )
     .fetch_one(&mut *tx)
     .await {
@@ -137,8 +136,8 @@ async fn extend_subscription(
         Ok(user) => {
          
             let other_server_url = match server {
-                "NE" => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
-                "DE" => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
+                "NE".to_string() => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
+                "DE".to_string() => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
                 _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
             };
 
@@ -314,8 +313,18 @@ async fn location(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web
         Ok(record) => record,
         Err(_) => return HttpResponse::NotFound().body("User not found"),
     };
-    let prev_server = user.server_location;
     let uuid = user.uuid;
+    let user = match sqlx::query!(
+        "SELECT server_location FROM users WHERE telegram_id = $1",
+        telegram_id
+    )
+    .fetch_one(pool.get_ref())
+    .await
+    {
+        Ok(record) => record,
+        Err(_) => return HttpResponse::NotFound().body("User not found"),
+    };
+    let prev_server = user.server_location;
 
     let other_server_url = match prev_server {
         "NE" => format!("https://svoivpn-ne.duckdns.org/remove/{}", uuid),
@@ -341,8 +350,8 @@ async fn location(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web
     }
 
     let other_server_url = match server {
-        "NE" => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
-        "DE" => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
+        "NE".to_string() => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
+        "DE".to_string() => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
         _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
     };
     match response {
@@ -396,9 +405,6 @@ async fn main() -> std::io::Result<()> {
 
 
     let pool_clone = pool.clone();
-    tokio::spawn(async move {
-        cleanup_task(web::Data::new(pool_clone)).await
-    });
 
     HttpServer::new(move || {
         App::new()

@@ -17,7 +17,7 @@ pub struct User {
     pub game_points: i64,
     pub is_used_ref_bonus: bool,
     pub game_attempts: i32,
-    pub server_location: String,
+    pub server_location: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,6 +35,6 @@ pub struct AddReferralData {
 
 #[derive(Deserialize)]
 pub struct ExtendSubscriptionRequest {
-    days: u32,
-    server: String, 
+    pub days: u32,
+    pub server: String, 
 }
