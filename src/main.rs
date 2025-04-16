@@ -37,19 +37,19 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     let user = match sqlx::query_as!(
         User,
         r#"
-        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points, is_used_ref_bonus, game_attempts, server_location)
-        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points, is_used_ref_bonus, game_attempts)
+        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6, $7, $8, $9)
         RETURNING *
         "#,
         data.telegram_id,
         uuid,
-        data.subscription_days as i32,
+        0.0,
         Utc::now(),
         referral_id,
         false,
-        0,
+        0i64,
         false,
-        0
+        0i64,
     )
     .fetch_one(&mut *tx)
     .await {
@@ -135,7 +135,7 @@ async fn extend_subscription(
     match result {
         Ok(user) => {
          
-            let other_server_url = match server.as_str() {
+            let other_server_url = match server {
                 "NE" => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
                 "DE" => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
                 _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
@@ -149,11 +149,9 @@ async fn extend_subscription(
 
             match response {
                 Ok(resp) if !resp.status().is_success() => {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
                     return HttpResponse::InternalServerError().body("Failed to sync with external service");
                 },
-                Err(e) => {
+                Err(_e) => {
                     return HttpResponse::InternalServerError().body("Failed to connect to external service");
                 },
                 _ => {}

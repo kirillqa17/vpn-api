@@ -16,14 +16,13 @@ pub struct User {
     pub is_used_trial: bool,
     pub game_points: i64,
     pub is_used_ref_bonus: bool,
-    pub game_attempts: i32,
+    pub game_attempts: i64,
     pub server_location: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NewUser {
-    pub telegram_id: Option<i64>,
-    pub subscription_days: u32,
+    pub telegram_id: i64,
     pub referral_id: Option<i64>,
 }
 
