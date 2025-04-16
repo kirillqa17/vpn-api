@@ -12,93 +12,6 @@ use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 mod models;
 use models::{User, NewUser, AddReferralData};
 
-const XRAY_CONFIG_PATH: &str = "/usr/local/etc/xray/config.json";
-
-fn update_xray_config(uuid: &str) -> Result<(), String> {
-    let config_data = fs::read_to_string(XRAY_CONFIG_PATH)
-        .map_err(|e| format!("Ошибка чтения конфигурации: {}", e))?;
-    let mut config: Value = serde_json::from_str(&config_data)
-        .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
-    if let Some(inbounds) = config["inbounds"].as_array_mut() {
-        for inbound in inbounds {
-            if inbound["tag"] == "vless-inbound" {
-                if let Some(clients) = inbound["settings"]["clients"].as_array_mut() {
-                    clients.push(json!({ "id": uuid }));
-                }
-            }
-        }
-    }
-
-    fs::write(XRAY_CONFIG_PATH, serde_json::to_string_pretty(&config).unwrap())
-        .map_err(|e| format!("Ошибка записи конфигурации: {}", e))?;
-
-    Command::new("systemctl")
-        .arg("restart")
-        .arg("xray")
-        .output()
-        .map_err(|e| format!("Ошибка при отправке SIGHUP: {}", e))?;
-
-    Ok(())
-}
-
-fn remove_user_from_xray_config(uuid: &str) -> Result<(), String> {
-    let config_data = fs::read_to_string(XRAY_CONFIG_PATH)
-        .map_err(|e| format!("Ошибка чтения конфигурации: {}", e))?;
-
-    let mut config: Value = serde_json::from_str(&config_data)
-        .map_err(|e| format!("Ошибка парсинга JSON: {}", e))?;
-
-    if let Some(inbounds) = config["inbounds"].as_array_mut() {
-        for inbound in inbounds {
-            if inbound["tag"] == "vless-inbound" {
-                if let Some(clients) = inbound["settings"]["clients"].as_array_mut() {
-                    clients.retain(|client| client["id"] != uuid);
-                }
-            }
-        }
-    }
-
-    fs::write(XRAY_CONFIG_PATH, serde_json::to_string_pretty(&config).unwrap())
-        .map_err(|e| format!("Ошибка записи конфигурации: {}", e))?;
-
-    Command::new("systemctl")
-        .arg("restart")
-        .arg("xray")
-        .output()
-        .map_err(|e| format!("Ошибка при отправке SIGHUP: {}", e))?;
-
-    Ok(())
-}
-
-fn check_user_in_xray_config(uuid: &str) -> bool {
-    let config_data = match fs::read_to_string(XRAY_CONFIG_PATH) {
-        Ok(data) => data,
-        Err(_) => return false,  // Если не удалось прочитать конфиг, считаем, что пользователя нет
-    };
-
-    let config: Value = match serde_json::from_str(&config_data) {
-        Ok(config) => config,
-        Err(_) => return false,  // Если не удалось распарсить JSON, считаем, что пользователя нет
-    };
-
-    if let Some(inbounds) = config["inbounds"].as_array() {
-        for inbound in inbounds {
-            if inbound["tag"] == "vless-inbound" {
-                if let Some(clients) = inbound["settings"]["clients"].as_array() {
-                    for client in clients {
-                        if client["id"] == uuid {
-                            return true;  // Пользователь найден в конфиге
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    false  // Если пользователь не найден
-}
-
-
 async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
     let existing_user = sqlx::query!(
         "SELECT telegram_id FROM users WHERE telegram_id = $1",
@@ -128,8 +41,8 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     let user = match sqlx::query_as!(
         User,
         r#"
-        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points)
-        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6, $7)
+        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points, is_used_ref_bonus, game_attempts, server_location)
+        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6, $7, $8, $9, $10)
         RETURNING *
         "#,
         data.telegram_id,
@@ -138,7 +51,10 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         Utc::now(),
         referral_id,
         false,
-        0
+        0,
+        false,
+        0,
+        "NE".to_string()
     )
     .fetch_one(&mut *tx)
     .await {
@@ -167,34 +83,6 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     HttpResponse::Ok().json(user)
 }
 
-
-
-async fn cleanup_task(pool: web::Data<PgPool>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(3600));
-
-    loop {
-        interval.tick().await;
-
-        let expired_users = match sqlx::query!("SELECT uuid FROM users WHERE (subscription_end < NOW() AND is_active = 1) OR is_active = 2")
-            .fetch_all(pool.get_ref())
-            .await
-        {
-            Ok(users) => users,
-            Err(_) => continue,
-        };
-
-        for user in expired_users {
-            if let Err(e) = remove_user_from_xray_config(&user.uuid.to_string()) {
-                eprintln!("Ошибка удаления пользователя из Xray: {}", e);
-                continue;
-            }
-
-            let _ = sqlx::query!("UPDATE users SET is_active = 0 WHERE uuid = $1", user.uuid)
-                .execute(pool.get_ref())
-                .await;
-        }
-    }
-}
 
 async fn list_users(pool: web::Data<PgPool>) -> HttpResponse {
     let users = match sqlx::query_as!(User, "SELECT * FROM users")
@@ -228,9 +116,7 @@ async fn extend_subscription(
     };
 
     let uuid = user.uuid;
-
-    // Проверяем, существует ли пользователь в конфиге Xray
-    let user_exists_in_config = check_user_in_xray_config(&uuid.to_string());
+    let server = user.server_location;
 
     // Обновляем срок подписки
     let result = sqlx::query_as!(
@@ -251,11 +137,29 @@ async fn extend_subscription(
 
     match result {
         Ok(user) => {
-            // Если пользователя не было в конфиге Xray, добавляем его обратно
-            if !user_exists_in_config {
-                if let Err(e) = update_xray_config(&uuid.to_string()) {
-                    return HttpResponse::InternalServerError().body(format!("Xray конфиг ошибка: {}", e));
-                }
+         
+            let other_server_url = match server {
+                "NE" => format!("https://svoivpn-ne.duckdns.org/extend/{}", telegram_id),
+                "DE" => format!("https://svoivpn-de.duckdns.org/extend/{}", telegram_id),
+                _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
+            };
+
+            let client = reqwest::Client::new();
+            let response = client.patch(&other_server_url)
+                .json(&days.0)
+                .send()
+                .await;
+
+            match response {
+                Ok(resp) if !resp.status().is_success() => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return HttpResponse::InternalServerError().body("Failed to sync with external service");
+                },
+                Err(e) => {
+                    return HttpResponse::InternalServerError().body("Failed to connect to external service");
+                },
+                _ => {}
             }
 
             // Возвращаем полную информацию о пользователе
