@@ -34,7 +34,7 @@ pub struct AddReferralData {
 }
 
 #[derive(Deserialize)]
-struct ExtendSubscriptionRequest {
+pub struct ExtendSubscriptionRequest {
     days: u32,
     server: String, 
 }

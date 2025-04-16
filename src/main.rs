@@ -3,14 +3,10 @@ use serde_json::json;
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
-use std::fs;
-use std::process::Command;
-use serde_json::Value;
-use std::time::Duration;
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 
 mod models;
-use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest};
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest };
 
 async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
     let existing_user = sqlx::query!(
@@ -308,17 +304,18 @@ async fn location(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web
     let server = data.into_inner();
     let telegram_id = telegram_id.into_inner();
 
-    let prev_server = match sqlx::query!(
-        r#"
-        SELECT server_location FROM users WHERE telegram_id = $1
-        "#,
+    let user = match sqlx::query!(
+        "SELECT uuid FROM users WHERE telegram_id = $1",
         telegram_id
     )
     .fetch_one(pool.get_ref())
-    .await{
+    .await
+    {
         Ok(record) => record,
-        Err(_) => return HttpResponse::BadRequest().body("Error collecting prev_server")
+        Err(_) => return HttpResponse::NotFound().body("User not found"),
     };
+    let prev_server = user.server_location;
+    let uuid = user.uuid;
 
     let other_server_url = match prev_server {
         "NE" => format!("https://svoivpn-ne.duckdns.org/remove/{}", uuid),
