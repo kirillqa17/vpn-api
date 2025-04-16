@@ -10,7 +10,7 @@ use std::time::Duration;
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 
 mod models;
-use models::{User, NewUser, AddReferralData};
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest};
 
 async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
     let existing_user = sqlx::query!(
@@ -99,9 +99,11 @@ async fn list_users(pool: web::Data<PgPool>) -> HttpResponse {
 async fn extend_subscription(
     pool: web::Data<PgPool>,
     telegram_id: web::Path<i64>,
-    days: web::Json<u32>,
+    request: web::Json<ExtendSubscriptionRequest>,
 ) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
+    let days = request.days;
+    let server = request.server.as_str();
 
     // Получаем uuid пользователя
     let user = match sqlx::query!(
@@ -116,7 +118,7 @@ async fn extend_subscription(
     };
 
     let uuid = user.uuid;
-    let server = user.server_location;
+
 
     // Обновляем срок подписки
     let result = sqlx::query_as!(
@@ -139,13 +141,13 @@ async fn extend_subscription(
         Ok(user) => {
          
             let other_server_url = match server {
-                "NE" => format!("https://svoivpn-ne.duckdns.org/extend/{}", telegram_id),
-                "DE" => format!("https://svoivpn-de.duckdns.org/extend/{}", telegram_id),
+                "NE" => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
+                "DE" => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
                 _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
             };
 
             let client = reqwest::Client::new();
-            let response = client.patch(&other_server_url)
+            let response = client.post(&other_server_url)
                 .json(&days.0)
                 .send()
                 .await;
@@ -302,6 +304,86 @@ async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::J
     result
 }
 
+async fn location(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::Json<String>) -> HttpResponse {
+    let server = data.into_inner();
+    let telegram_id = telegram_id.into_inner();
+
+    let prev_server = match sqlx::query!(
+        r#"
+        SELECT server_location FROM users WHERE telegram_id = $1
+        "#,
+        telegram_id
+    )
+    .fetch_one(pool.get_ref())
+    .await{
+        Ok(record) => record,
+        Err(_) => return HttpResponse::BadRequest().body("Error collecting prev_server")
+    };
+
+    let other_server_url = match prev_server {
+        "NE" => format!("https://svoivpn-ne.duckdns.org/remove/{}", uuid),
+        "DE" => format!("https://svoivpn-de.duckdns.org/remove/{}", uuid),
+        _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
+    };
+
+    let client = reqwest::Client::new();
+    let response = client.post(&other_server_url)
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) if !resp.status().is_success() => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return HttpResponse::InternalServerError().body("Failed to sync with external service");
+        },
+        Err(e) => {
+            return HttpResponse::InternalServerError().body("Failed to connect to external service");
+        },
+        _ => {}
+    }
+
+    let other_server_url = match server {
+        "NE" => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
+        "DE" => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
+        _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
+    };
+    match response {
+        Ok(resp) if !resp.status().is_success() => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return HttpResponse::InternalServerError().body("Failed to sync with external service");
+        },
+        Err(e) => {
+            return HttpResponse::InternalServerError().body("Failed to connect to external service");
+        },
+        _ => {}
+    }
+
+    let result = match sqlx::query!(
+        r#"
+        UPDATE users 
+        SET server_location = $1
+        WHERE telegram_id = $2
+        "#,
+        server,
+        telegram_id
+    )
+    .execute(pool.get_ref())
+    .await {
+        Ok(result) => {
+            if result.rows_affected() == 0 {
+                HttpResponse::NotFound().body("User not found")
+            }   
+            else {
+                HttpResponse::Ok().body("Trial status updated successfully")
+            }
+        }
+        Err(_) => HttpResponse::InternalServerError().body("Failed to update trial status")
+    };
+    result
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
@@ -336,6 +418,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
+            .service(web::resource("/users/{telegram_id}/change_location").route(web::patch().to(location)))
     })
     .bind_openssl("0.0.0.0:443", builder)?
     .run()

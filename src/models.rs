@@ -33,7 +33,8 @@ pub struct AddReferralData {
     pub referred_telegram_id: i64, // telegram_id приглашаемого пользователя
 }
 
-#[derive(Serialize)]
-pub struct ReferralResponse {
-    pub referral_id: Option<i64>,
+#[derive(Deserialize)]
+struct ExtendSubscriptionRequest {
+    days: u32,
+    server: String, 
 }
