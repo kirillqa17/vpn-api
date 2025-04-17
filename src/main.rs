@@ -114,62 +114,61 @@ async fn extend_subscription(
 
     let uuid = user.uuid;
 
+    
+    let other_server_url = match server {
+        "NE" => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
+        "DE" => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
+        _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
+    };
 
-    // Обновляем срок подписки
+    let client = reqwest::Client::new();
+    let response = client.post(&other_server_url)
+        .json(&days)
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) if !resp.status().is_success() => {
+            return HttpResponse::InternalServerError().body("Failed to sync with external service");
+        },
+        Err(_e) => {
+            return HttpResponse::InternalServerError().body("Failed to connect to external service");
+        },
+        _ => {}
+    }
+
     let result = sqlx::query_as!(
         User,
         r#"
         UPDATE users 
         SET 
             subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day',
-            is_active = 1
-        WHERE telegram_id = $2
+            is_active = 1,
+            server_location = $2
+        WHERE telegram_id = $3
         RETURNING *
         "#,
         days as i32,
+        server,
         telegram_id
     )
     .fetch_one(pool.get_ref())
     .await;
-
     match result {
         Ok(user) => {
-         
-            let other_server_url = match server {
-                "NE" => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
-                "DE" => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
-                _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
-            };
-
-            let client = reqwest::Client::new();
-            let response = client.post(&other_server_url)
-                .json(&days)
-                .send()
-                .await;
-
-            match response {
-                Ok(resp) if !resp.status().is_success() => {
-                    return HttpResponse::InternalServerError().body("Failed to sync with external service");
-                },
-                Err(_e) => {
-                    return HttpResponse::InternalServerError().body("Failed to connect to external service");
-                },
-                _ => {}
-            }
-
-            // Возвращаем полную информацию о пользователе
             HttpResponse::Ok().json(json!({
                 "telegram_id": user.telegram_id,
                 "uuid": uuid,
                 "subscription_end": user.subscription_end,
                 "is_active": user.is_active,
-                "created_at": user.created_at,
-                "referral_id": user.referral_id,
-                "referrals": user.referrals
+                "server" : server
             }))
+        },
+        Err(_e) => {
+            return HttpResponse::InternalServerError().body("Failed to update database");
         }
-        Err(_) => HttpResponse::InternalServerError().finish(),
     }
+    
 }
 
 
