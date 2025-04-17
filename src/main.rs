@@ -1,5 +1,7 @@
 use actix_web::{web, App, HttpResponse, HttpServer};
 use serde_json::json;
+use serde_json::Value;
+use std::collections::HashMap;
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
@@ -296,8 +298,8 @@ async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::J
     result
 }
 
-async fn location(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::Json<String>) -> HttpResponse {
-    let server = data.into_inner();
+async fn location(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::Json<HashMap<String, String>>) -> HttpResponse {
+    let server = data.into_inner().get("server_location").unwrap_or(&"".to_string()).clone();
     let telegram_id = telegram_id.into_inner();
 
     let user = match sqlx::query!(
