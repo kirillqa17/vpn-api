@@ -4,8 +4,6 @@ use std::collections::HashMap;
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
-use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
-
 mod models;
 use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest };
 
@@ -396,13 +394,6 @@ async fn main() -> std::io::Result<()> {
         .await
         .unwrap();
 
-    // Настройка SSL
-    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    builder.set_private_key_file("certs/privkey.pem", SslFiletype::PEM)?;
-    builder.set_certificate_chain_file("certs/fullchain.pem")?;
-
-
-
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -420,7 +411,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
             .service(web::resource("/users/{telegram_id}/change_location").route(web::patch().to(location)))
     })
-    .bind_openssl("0.0.0.0:443", builder)?
+    .bind("127.0.0.1:8080")?
     .run()
     .await
 }
