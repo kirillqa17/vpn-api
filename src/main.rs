@@ -1,6 +1,5 @@
 use actix_web::{web, App, HttpResponse, HttpServer};
 use serde_json::json;
-use serde_json::Value;
 use std::collections::HashMap;
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
