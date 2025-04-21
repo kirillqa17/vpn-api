@@ -18,6 +18,7 @@ pub struct User {
     pub is_used_ref_bonus: bool,
     pub game_attempts: i64,
     pub server_location: Option<String>,
+    pub next_claim_time: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
