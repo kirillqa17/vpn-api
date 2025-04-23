@@ -19,6 +19,8 @@ pub struct User {
     pub game_attempts: i64,
     pub server_location: Option<String>,
     pub next_claim_time: DateTime<Utc>,
+    pub record_flappy: i64,
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
