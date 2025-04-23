@@ -9,19 +9,21 @@ pub struct User {
     pub telegram_id: i64,
     pub uuid: Uuid,
     pub subscription_end: DateTime<Utc>,
-    pub is_active: i16,
+    pub is_active: i32,
     pub created_at: DateTime<Utc>,
     pub referrals: Option<Vec<i64>>,  
     pub referral_id: Option<i64>,
     pub is_used_trial: bool,
     pub game_points: i64,
     pub is_used_ref_bonus: bool,
+    pub game_attempts: i64,
+    pub server_location: Option<String>,
+    pub next_claim_time: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NewUser {
-    pub telegram_id: Option<i64>,
-    pub subscription_days: u32,
+    pub telegram_id: i64,
     pub referral_id: Option<i64>,
 }
 
@@ -31,7 +33,8 @@ pub struct AddReferralData {
     pub referred_telegram_id: i64, // telegram_id приглашаемого пользователя
 }
 
-#[derive(Serialize)]
-pub struct ReferralResponse {
-    pub referral_id: Option<i64>,
+#[derive(Deserialize)]
+pub struct ExtendSubscriptionRequest {
+    pub days: u32,
+    pub server: String, 
 }
