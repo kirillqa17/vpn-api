@@ -27,6 +27,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
 
     let uuid = Uuid::new_v4();
     let referral_id = data.referral_id;
+    let username = data.username;
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -36,8 +37,8 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     let user = match sqlx::query_as!(
         User,
         r#"
-        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points, is_used_ref_bonus, game_attempts)
-        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6, $7, $8, $9)
+        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points, is_used_ref_bonus, game_attempts, username)
+        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6, $7, $8, $9, $10)
         RETURNING *
         "#,
         data.telegram_id,
@@ -49,6 +50,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         0i64,
         false,
         0i64,
+        username
     )
     .fetch_one(&mut *tx)
     .await {

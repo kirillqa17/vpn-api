@@ -25,6 +25,7 @@ pub struct User {
 pub struct NewUser {
     pub telegram_id: i64,
     pub referral_id: Option<i64>,
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
