@@ -27,7 +27,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
 
     let uuid = Uuid::new_v4();
     let referral_id = data.referral_id;
-    let username = data.username;
+    let username = data.username.clone();
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
