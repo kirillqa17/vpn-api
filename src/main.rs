@@ -322,8 +322,8 @@ async fn location(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web
         Ok(record) => record,
         Err(_) => return HttpResponse::NotFound().body("User not found"),
     };
-    let prev_server = user.server_location.as_deref().unwrap_or_default();
-
+    let prev_server = user.server_location.as_ref().map(|s| s.as_str()).unwrap_or_default();
+    
     let other_server_url = match prev_server {
         "NE" => format!("https://svoivpn-ne.duckdns.org/remove/{}", uuid),
         "DE" => format!("https://svoivpn-de.duckdns.org/remove/{}", uuid),
