@@ -388,6 +388,48 @@ async fn location(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web
     result
 }
 
+async fn get_subscription_config(
+    pool: web::Data<PgPool>,
+    telegram_id: web::Path<i64>,
+) -> HttpResponse {
+    let user = match sqlx::query_as!(
+        User,
+        "SELECT * FROM users WHERE telegram_id = $1",
+        telegram_id.into_inner()
+    )
+    .fetch_one(pool.get_ref())
+    .await {
+        Ok(user) => user,
+        Err(_) => return HttpResponse::NotFound().json("User not found"),
+    };
+
+    if user.is_active != 1 {
+        return HttpResponse::Forbidden().json("Subscription not active");
+    }
+
+    let configs = vec![
+        generate_vless_config(&user.uuid, "NE"),
+        generate_vless_config(&user.uuid, "DE"),
+    ];
+
+    HttpResponse::Ok()
+        .content_type("text/plain")
+        .body(configs.join("\n"))
+}
+
+fn generate_vless_config(uuid: &Uuid, server: &str) -> String {
+    let domain = match server {
+        "NE" => "svoivpn-ne.duckdns.org",
+        "DE" => "svoivpn-de.duckdns.org",
+        _ => panic!("Unknown server"),
+    };
+
+    format!(
+        "vless://{}@{}:8443?security=tls&type=tcp#{}",
+        uuid, domain, server
+    )
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
@@ -412,6 +454,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
             .service(web::resource("/users/{telegram_id}/change_location").route(web::patch().to(location)))
+            .service(web::resource("/users/{telegram_id}/sub").route(web::get().to(get_subscription_config)))
     })
     .bind("127.0.0.1:8080")?
     .run()
