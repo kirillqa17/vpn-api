@@ -99,7 +99,6 @@ async fn extend_subscription(
 ) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
     let days = request.days;
-    let server = request.server.as_str();
 
     // Получаем uuid пользователя
     let user = match sqlx::query!(
@@ -116,12 +115,6 @@ async fn extend_subscription(
     let uuid = user.uuid;
 
     
-    let other_server_url = match server {
-        "NE" => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
-        "DE" => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
-        _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
-    };
-
     let client = reqwest::Client::new();
     let response = client.post(&other_server_url)
         .json(&days)
@@ -144,13 +137,11 @@ async fn extend_subscription(
         UPDATE users 
         SET 
             subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day',
-            is_active = 1,
-            server_location = $2
+            is_active = 1
         WHERE telegram_id = $3
         RETURNING *
         "#,
         days as i32,
-        server,
         telegram_id
     )
     .fetch_one(pool.get_ref())
@@ -162,7 +153,6 @@ async fn extend_subscription(
                 "uuid": uuid,
                 "subscription_end": user.subscription_end,
                 "is_active": user.is_active,
-                "server" : server
             }))
         },
         Err(_e) => {
@@ -297,97 +287,6 @@ async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::J
     result
 }
 
-async fn location(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::Json<HashMap<String, String>>) -> HttpResponse {
-    let server = data.into_inner().get("server_location").unwrap_or(&"".to_string()).clone();
-    let telegram_id = telegram_id.into_inner();
-
-    let user = match sqlx::query!(
-        "SELECT uuid FROM users WHERE telegram_id = $1",
-        telegram_id
-    )
-    .fetch_one(pool.get_ref())
-    .await
-    {
-        Ok(record) => record,
-        Err(_) => return HttpResponse::NotFound().body("User not found"),
-    };
-    let uuid = user.uuid;
-    let user = match sqlx::query!(
-        "SELECT server_location FROM users WHERE telegram_id = $1",
-        telegram_id
-    )
-    .fetch_one(pool.get_ref())
-    .await
-    {
-        Ok(record) => record,
-        Err(_) => return HttpResponse::NotFound().body("User not found"),
-    };
-    let prev_server = user.server_location;
-
-    let other_server_url = match prev_server.as_str() {
-        "NE" => format!("https://svoivpn-ne.duckdns.org/remove/{}", uuid),
-        "DE" => format!("https://svoivpn-de.duckdns.org/remove/{}", uuid),
-        _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
-    };
-
-    let client = reqwest::Client::new();
-    let response = client.post(&other_server_url)
-        .send()
-        .await;
-
-    match response {
-        Ok(resp) if !resp.status().is_success() => {
-            return HttpResponse::InternalServerError().body("Failed to sync with external service");
-        },
-        Err(_e) => {
-            return HttpResponse::InternalServerError().body("Failed to connect to external service");
-        },
-        _ => {}
-    }
-
-    let other_server_url = match server.as_str() {
-        "NE" => format!("https://svoivpn-ne.duckdns.org/add/{}", uuid),
-        "DE" => format!("https://svoivpn-de.duckdns.org/add/{}", uuid),
-        _ => return HttpResponse::InternalServerError().body("OTHER_SERVER_URL not configured"),
-    };
-    let response = client.post(&other_server_url)
-        .send()
-        .await;
-    match response {
-        Ok(resp) if !resp.status().is_success() => {
-
-            return HttpResponse::InternalServerError().body("Failed to sync with external service");
-        },
-        Err(_e) => {
-            return HttpResponse::InternalServerError().body("Failed to connect to external service");
-        },
-        _ => {}
-    }
-
-    let result = match sqlx::query!(
-        r#"
-        UPDATE users 
-        SET server_location = $1
-        WHERE telegram_id = $2
-        "#,
-        server,
-        telegram_id
-    )
-    .execute(pool.get_ref())
-    .await {
-        Ok(result) => {
-            if result.rows_affected() == 0 {
-                HttpResponse::NotFound().body("User not found")
-            }   
-            else {
-                HttpResponse::Ok().body("Trial status updated successfully")
-            }
-        }
-        Err(_) => HttpResponse::InternalServerError().body("Failed to update trial status")
-    };
-    result
-}
-
 async fn get_subscription_config(
     pool: web::Data<PgPool>,
     telegram_id: web::Path<i64>,
@@ -453,7 +352,6 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
-            .service(web::resource("/users/{telegram_id}/change_location").route(web::patch().to(location)))
             .service(web::resource("/users/{telegram_id}/sub").route(web::get().to(get_subscription_config)))
     })
     .bind("127.0.0.1:8080")?
