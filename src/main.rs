@@ -114,21 +114,35 @@ async fn extend_subscription(
 
     let uuid = user.uuid;
 
-    
-    let client = reqwest::Client::new();
-    let response = client.post(&other_server_url)
-        .json(&days)
-        .send()
-        .await;
+    let servers = [
+        ("DE", "svoivpn-de.duckdns.org"),
+        ("NE", "svoivpn-ne.duckdns.org"),
+    ];
 
-    match response {
-        Ok(resp) if !resp.status().is_success() => {
-            return HttpResponse::InternalServerError().body("Failed to sync with external service");
-        },
-        Err(_e) => {
-            return HttpResponse::InternalServerError().body("Failed to connect to external service");
-        },
-        _ => {}
+    
+    let mut errors = Vec::new();
+    let client = reqwest::Client::new();
+
+    // Отправляем запросы на все серверы
+    for (server_code, domain) in servers.iter() {
+        let url = format!("https://{}/add/{}", domain, uuid); // Предполагаемый endpoint
+        let response = client.post(&url)
+            .json(&days)
+            .send()
+            .await;
+
+        if let Err(e) = response {
+            errors.push(format!("Failed to connect to {} server: {}", server_code, e));
+        } else if let Ok(resp) = response {
+            if !resp.status().is_success() {
+                errors.push(format!("Failed to sync with {} server: {}", server_code, resp.status()));
+            }
+        }
+    }
+
+    // Если были ошибки при синхронизации с серверами
+    if !errors.is_empty() {
+        return HttpResponse::InternalServerError().body(errors.join(", "));
     }
 
     let result = sqlx::query_as!(
@@ -138,7 +152,7 @@ async fn extend_subscription(
         SET 
             subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day',
             is_active = 1
-        WHERE telegram_id = $3
+        WHERE telegram_id = $2
         RETURNING *
         "#,
         days as i32,
