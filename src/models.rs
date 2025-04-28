@@ -20,6 +20,7 @@ pub struct User {
     pub next_claim_time: DateTime<Utc>,
     pub record_flappy: i64,
     pub username: Option<String>,
+    pub plan: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,4 +39,13 @@ pub struct AddReferralData {
 #[derive(Deserialize)]
 pub struct ExtendSubscriptionRequest {
     pub days: u32,
+    pub plan: String,
+}
+
+#[derive(Debug)]
+pub struct ServerConfig {
+    pub address: String,
+    pub sni: String,
+    pub fp: String,
+    pub name: String,
 }
