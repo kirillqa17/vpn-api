@@ -8,6 +8,7 @@ use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ServerCo
 use urlencoding::encode;
 use base64::engine::general_purpose;
 use base64::Engine;
+use futures::future::join_all;
 
 async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
     let existing_user = sqlx::query!(
@@ -131,22 +132,24 @@ async fn extend_subscription(
     let mut errors = Vec::new();
     let client = reqwest::Client::new();
 
-    // Отправляем запросы на все серверы
-    for (server_code, domain) in servers.iter() {
-        let url = format!("https://{}/add/{}", domain, uuid); 
-        let response = client.post(&url)
-            .json(&conn_limit)
-            .send()
-            .await;
-
-        if let Err(e) = response {
-            errors.push(format!("Failed to connect to {} server: {}", server_code, e));
-        } else if let Ok(resp) = response {
-            if !resp.status().is_success() {
-                errors.push(format!("Failed to sync with {} server: {}", server_code, resp.status()));
-            }
+    let futures = servers.iter().map(|(server_code, domain)| {
+        let client = &client;
+        let url = format!("https://{}/add/{}", domain, uuid);
+        async move {
+            match client.post(&url)
+                .json(&conn_limit)
+                .send()
+                .await {
+                    Ok(resp) if resp.status().is_success() => Ok(()),
+                    Ok(resp) => Err(format!("Failed to sync with {} server: {}", server_code, resp.status())),
+                    Err(e) => Err(format!("Failed to connect to {} server: {}", server_code, e)),
+                }
         }
-    }
+    });
+
+    let results = join_all(futures).await;
+
+    let errors: Vec<String> = results.into_iter().filter_map(|res| res.err()).collect();
 
     // Если были ошибки при синхронизации с серверами
     if !errors.is_empty() {
