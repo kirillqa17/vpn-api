@@ -41,11 +41,3 @@ pub struct ExtendSubscriptionRequest {
     pub days: u32,
     pub plan: String,
 }
-
-#[derive(Debug)]
-pub struct ServerConfig {
-    pub address: String,
-    pub sni: String,
-    pub fp: String,
-    pub name: String,
-}

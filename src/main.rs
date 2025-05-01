@@ -4,13 +4,17 @@ use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
 mod models;
-use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ServerConfig};
-use urlencoding::encode;
-use base64::engine::general_purpose;
-use base64::Engine;
-use futures::future::join_all;
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest};
+
+
+lazy_static::lazy_static! {
+    static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
+    static ref REMNAWAVE_API_BASE: String = std::env::var("REMNAWAVE_API_BASE").unwrap_or_else(|_| "https://svoivpn.duckdns.org/api".to_string());
+    static ref REMNAWAVE_API_KEY: String = std::env::var("REMNAWAVE_API_KEY").expect("REMNAWAVE_API_KEY must be set");
+}
 
 async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
+    // Сначала проверяем существование пользователя в нашей БД
     let existing_user = sqlx::query!(
         "SELECT telegram_id FROM users WHERE telegram_id = $1",
         data.telegram_id
@@ -32,11 +36,38 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     let referral_id = data.referral_id;
     let username = data.username.clone();
 
+    let api_response = match HTTP_CLIENT
+        .post(&format!("{}/users", *REMNAWAVE_API_BASE))
+        .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "username": username,
+            "status": "DISABLED",
+            "subscriptionUuid": uuid,
+            "trafficLimitBytes": 0,
+            "trafficLimitStrategy": "MONTH",
+            "expireAt": Utc::now(),
+            "createdAt": Utc::now(),
+            "telegramId": data.telegram_id,
+            "hwidDeviceLimit": 2,
+        }))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+    };
+
+    if !api_response.status().is_success() {
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+    }
+
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
+    // Создаем пользователя в нашей БД
     let user = match sqlx::query_as!(
         User,
         r#"
@@ -118,44 +149,45 @@ async fn extend_subscription(
 
     let uuid = user.uuid;
 
-    let servers = [
-        ("DE", "svoivpn-de.duckdns.org"),
-        ("NE", "svoivpn-ne.duckdns.org"),
-    ];
-
-    let conn_limit = match plan.as_str() {
+    let device_limit = match plan.as_str() {
         "base" => 2,
         "family" => 5,
         _ => 2,
     };
-    
-    let mut errors = Vec::new();
-    let client = reqwest::Client::new();
 
-    let futures = servers.iter().map(|(server_code, domain)| {
-        let client = &client;
-        let url = format!("https://{}/add/{}", domain, uuid);
-        async move {
-            match client.post(&url)
-                .json(&conn_limit)
-                .send()
-                .await {
-                    Ok(resp) if resp.status().is_success() => Ok(()),
-                    Ok(resp) => Err(format!("Failed to sync with {} server: {}", server_code, resp.status())),
-                    Err(e) => Err(format!("Failed to connect to {} server: {}", server_code, e)),
-                }
-        }
-    });
+    let traffic_limit: u64 = match plan.as_str() {
+        "base" => 26843545600,
+        "family" => 214748364800,
+        _ => 26843545600,
+    };
+    let expire_at = Utc::now() + chrono::Duration::days(days as i64);
+    let expire_at_rfc3339 = expire_at.to_rfc3339();
 
-    let results = join_all(futures).await;
+    let api_response = match HTTP_CLIENT
+        .post(&format!("{}/users/update", *REMNAWAVE_API_BASE))
+        .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "uuid": uuid,
+            "status": "ACTIVE",
+            "trafficLimitBytes": traffic_limit,
+            "trafficLimitStrategy": "MONTH",
+            "expireAt": expire_at_rfc3339,
+            "telegramId": user.telegram_id,
+            "hwidDeviceLimit": device_limit
+        }))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+    };
 
-    let errors: Vec<String> = results.into_iter().filter_map(|res| res.err()).collect();
-
-    // Если были ошибки при синхронизации с серверами
-    if !errors.is_empty() {
-        return HttpResponse::InternalServerError().body(errors.join(", "));
+    if !api_response.status().is_success() {
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
 
+    
     let result = sqlx::query_as!(
         User,
         r#"
@@ -315,77 +347,7 @@ async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::J
     result
 }
 
-async fn get_subscription_config(
-    pool: web::Data<PgPool>,
-    telegram_id: web::Path<i64>,
-) -> HttpResponse {
-    let user = match sqlx::query_as!(
-        User,
-        "SELECT * FROM users WHERE telegram_id = $1",
-        telegram_id.into_inner()
-    )
-    .fetch_one(pool.get_ref())
-    .await {
-        Ok(user) => user,
-        Err(_) => return HttpResponse::NotFound().json("User not found"),
-    };
 
-    if user.is_active != 1 {
-        return HttpResponse::Forbidden().json("Subscription not active");
-    }
-
-    // Определяем серверы и их параметры
-    let servers = vec![
-        ServerConfig {
-            address: "103.7.55.172".to_string(),
-            sni: "www.apple.com".to_string(),
-            fp: "chrome".to_string(),
-            name: "🇩🇪 Германия".to_string(),
-        },
-        ServerConfig {
-            address: "46.17.99.157".to_string(),
-            sni: "www.cloudflare.com".to_string(),
-            fp: "chrome".to_string(),
-            name: "🇳🇱 Нидерланды".to_string(),
-        },
-    ];
-
-    // Общие параметры для всех серверов
-    let pbk = "Swx7Lw2oTs19zMXwF3TMIbJdNQD8EBbc-vEL1DjbLAk";
-    let sid = "7640cb77";
-
-    // Генерируем VLESS URI для каждого сервера
-    let mut configs = Vec::new();
-    for server in servers {
-        let params = format!(
-            "security=reality&type=tcp&headerType=&flow=xtls-rprx-vision&path=&host=&sni={}&fp={}&pbk={}&sid={}#{}",
-            server.sni,
-            server.fp,
-            pbk,
-            sid,
-            encode(&server.name)
-        );
-
-        let uri = format!(
-            "vless://{}@{}:8443?{}",
-            user.uuid,
-            server.address,
-            params
-        );
-
-        configs.push(uri);
-    }
-
-    // Объединяем все конфигурации в одну строку с разделителем новой строки
-    let combined_configs = configs.join("\n");
-
-    // Кодируем в base64
-    let encoded = general_purpose::STANDARD.encode(combined_configs);
-
-    HttpResponse::Ok()
-        .content_type("text/plain")
-        .body(encoded)
-}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -410,7 +372,6 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
-            .service(web::resource("/users/sub/{telegram_id}").route(web::get().to(get_subscription_config)))
     })
     .bind("127.0.0.1:8080")?
     .run()
