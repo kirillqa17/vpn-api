@@ -158,10 +158,12 @@ async fn extend_subscription(
     let traffic_limit: u64 = match plan.as_str() {
         "base" => 26843545600,
         "family" => 214748364800,
+        "trial" => 10737418240,
         _ => 26843545600,
     };
     let expire_at = Utc::now() + chrono::Duration::days(days as i64);
     let expire_at_rfc3339 = expire_at.to_rfc3339();
+    println!("{}", expire_at_rfc3339);
 
     let api_response = match HTTP_CLIENT
         .post(&format!("{}/users/update", *REMNAWAVE_API_BASE))
@@ -172,6 +174,9 @@ async fn extend_subscription(
             "status": "ACTIVE",
             "trafficLimitBytes": traffic_limit,
             "trafficLimitStrategy": "MONTH",
+            "activeUserInbounds": [
+                uuid
+            ],
             "expireAt": expire_at_rfc3339,
             "telegramId": user.telegram_id,
             "hwidDeviceLimit": device_limit
