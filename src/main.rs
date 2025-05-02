@@ -363,7 +363,36 @@ async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::J
     result
 }
 
+async fn get_sub_link(telegram_id: web::Path<i64>) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+    let api_response = match HTTP_CLIENT
+    .get(&format!("{}/users/tg/{}", *REMNAWAVE_API_BASE, telegram_id))
+    .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+    .header("Content-Type", "application/json")
+    .send()
+    .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+    };
 
+    if !api_response.status().is_success() {
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+    }
+
+    let json_response = match api_response.json::<serde_json::Value>().await {
+        Ok(json) => json,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
+    };
+
+    let sub_url = json_response["response"][0]["subscriptionUrl"]
+        .as_str()
+        .map(|s| s.to_string());
+
+    
+    HttpResponse::Ok().json(json!({ "subscription_url": sub_url }))
+    
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -388,6 +417,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
+            .service(web::resource("/users/{telegram_id}/get_sub").route(web::patch().to(get_sub_link)))
     })
     .bind("127.0.0.1:8080")?
     .run()
