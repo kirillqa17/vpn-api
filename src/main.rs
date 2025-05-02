@@ -187,9 +187,12 @@ async fn extend_subscription(
         Ok(resp) => resp,
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
     };
-
+    let status = api_response.status();
     if !api_response.status().is_success() {
-        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+        let error_body = api_response.text().await.unwrap_or_default();
+        println!("Remnawave API error response: {}", error_body);
+        return HttpResponse::InternalServerError()
+            .body(format!("Remnawave API error: {} - {}", status, error_body));
     }
 
     
