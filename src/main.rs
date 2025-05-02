@@ -186,7 +186,7 @@ async fn extend_subscription(
             "trafficLimitBytes": traffic_limit,
             "trafficLimitStrategy": "MONTH",
             "activeUserInbounds": [
-                uuid
+                "d92c68b5-41e9-47d0-b7ee-89e7c8640a59"
             ],
             "expireAt": expire_at_str,
             "telegramId": user.telegram_id,
