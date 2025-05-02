@@ -162,8 +162,8 @@ async fn extend_subscription(
         _ => 26843545600,
     };
     let expire_at = Utc::now() + chrono::Duration::days(days as i64);
-    let expire_at_rfc3339 = expire_at.to_rfc3339();
-    println!("{}", expire_at_rfc3339);
+    let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    println!("{}", expire_at_str);
 
     let api_response = match HTTP_CLIENT
         .post(&format!("{}/users/update", *REMNAWAVE_API_BASE))
@@ -177,7 +177,7 @@ async fn extend_subscription(
             "activeUserInbounds": [
                 uuid
             ],
-            "expireAt": expire_at_rfc3339,
+            "expireAt": expire_at_str,
             "telegramId": user.telegram_id,
             "hwidDeviceLimit": device_limit
         }))
