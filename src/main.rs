@@ -32,7 +32,6 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         _ => {}
     }
 
-    let uuid = Uuid::new_v4();
     let referral_id = data.referral_id;
     let username = data.username.clone();
 
@@ -43,7 +42,6 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         .json(&json!({
             "username": username,
             "status": "DISABLED",
-            "subscriptionUuid": uuid,
             "trafficLimitBytes": 0,
             "trafficLimitStrategy": "MONTH",
             "expireAt": Utc::now(),
@@ -61,6 +59,20 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     if !api_response.status().is_success() {
         return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
+
+    let uuid = match api_response.json::<serde_json::Value>().await {
+        Ok(json) => {
+            if let Some(uuid_str) = json["response"]["uuid"].as_str() {
+                match Uuid::parse_str(uuid_str) {
+                    Ok(uuid) => uuid,
+                    Err(_) => return HttpResponse::InternalServerError().body("Invalid UUID format in API response"),
+                }
+            } else {
+                return HttpResponse::InternalServerError().body("UUID not found in API response");
+            }
+        },
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
+    };
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -163,7 +175,6 @@ async fn extend_subscription(
     };
     let expire_at = Utc::now() + chrono::Duration::days(days as i64);
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-    println!("{}", expire_at_str);
 
     let api_response = match HTTP_CLIENT
         .post(&format!("{}/users/update", *REMNAWAVE_API_BASE))
@@ -187,12 +198,9 @@ async fn extend_subscription(
         Ok(resp) => resp,
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
     };
-    let status = api_response.status();
+
     if !api_response.status().is_success() {
-        let error_body = api_response.text().await.unwrap_or_default();
-        println!("Remnawave API error response: {}", error_body);
-        return HttpResponse::InternalServerError()
-            .body(format!("Remnawave API error: {} - {}", status, error_body));
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
 
     
