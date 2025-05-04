@@ -394,6 +394,35 @@ async fn get_sub_link(telegram_id: web::Path<i64>) -> HttpResponse {
     
 }
 
+async fn get_traffic(telegram_id: web::Path<i64>) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+    let api_response = match HTTP_CLIENT
+    .get(&format!("{}/users/tg/{}", *REMNAWAVE_API_BASE, telegram_id))
+    .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+    .header("Content-Type", "application/json")
+    .send()
+    .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+    };
+
+    if !api_response.status().is_success() {
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+    }
+
+    let json_response = match api_response.json::<serde_json::Value>().await {
+        Ok(json) => json,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
+    };
+
+    let traffic_limit = json_response["response"][0]["trafficLimitBytes"].as_i64().unwrap();
+    let traffic_used = json_response["response"][0]["usedTrafficBytes"].as_i64().unwrap();
+    
+    HttpResponse::Ok().json(json!({ "traffic_left": traffic_limit - traffic_used }))
+    
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
@@ -418,6 +447,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
             .service(web::resource("/users/{telegram_id}/get_sub").route(web::patch().to(get_sub_link)))
+            .service(web::resource("/users/{telegram_id}/traffic").route(web::patch().to(get_traffic)))
     })
     .bind("127.0.0.1:8080")?
     .run()
