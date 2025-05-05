@@ -21,6 +21,7 @@ pub struct User {
     pub record_flappy: i64,
     pub username: Option<String>,
     pub plan: String,
+    pub sub_link: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

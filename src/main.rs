@@ -60,19 +60,20 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
 
-    let uuid = match api_response.json::<serde_json::Value>().await {
-        Ok(json) => {
-            if let Some(uuid_str) = json["response"]["uuid"].as_str() {
-                match Uuid::parse_str(uuid_str) {
-                    Ok(uuid) => uuid,
-                    Err(_) => return HttpResponse::InternalServerError().body("Invalid UUID format in API response"),
-                }
-            } else {
-                return HttpResponse::InternalServerError().body("UUID not found in API response");
-            }
-        },
+    let json_response = match api_response.json::<serde_json::Value>().await {
+        Ok(json) => json,
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
     };
+
+    let uuid = json_response["response"]["uuid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let sub_url = json_response["response"]["subscriptionUrl"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -83,8 +84,8 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     let user = match sqlx::query_as!(
         User,
         r#"
-        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points, is_used_ref_bonus, game_attempts, username)
-        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points, is_used_ref_bonus, game_attempts, username, sub_link)
+        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING *
         "#,
         data.telegram_id,
@@ -96,7 +97,8 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         0i64,
         false,
         0i64,
-        username
+        username,
+        sub_url
     )
     .fetch_one(&mut *tx)
     .await {
@@ -390,37 +392,6 @@ async fn ref_bonus(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: we
     result
 }
 
-async fn get_sub_link(telegram_id: web::Path<i64>) -> HttpResponse {
-    let telegram_id = telegram_id.into_inner();
-    let api_response = match HTTP_CLIENT
-    .get(&format!("{}/users/tg/{}", *REMNAWAVE_API_BASE, telegram_id))
-    .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
-    .header("Content-Type", "application/json")
-    .send()
-    .await
-    {
-        Ok(resp) => resp,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
-    };
-
-    if !api_response.status().is_success() {
-        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
-    }
-
-    let json_response = match api_response.json::<serde_json::Value>().await {
-        Ok(json) => json,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
-    };
-
-    let sub_url = json_response["response"][0]["subscriptionUrl"]
-        .as_str()
-        .map(|s| s.to_string());
-
-    
-    HttpResponse::Ok().json(json!({ "subscription_url": sub_url }))
-    
-}
-
 async fn get_expiring_users(
     pool: web::Data<PgPool>,
     query: web::Query<HashMap<String, String>>,
@@ -561,7 +532,6 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
-            .service(web::resource("/users/{telegram_id}/get_sub").route(web::get().to(get_sub_link)))
             .service(web::resource("/users/{telegram_id}/traffic").route(web::get().to(get_traffic)))
             .service(web::resource("/users/{telegram_id}/ref_bonus").route(web::patch().to(ref_bonus)))
             .service(web::resource("/users/expiring").route(web::get().to(get_expiring_users)))
