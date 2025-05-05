@@ -176,7 +176,10 @@ async fn extend_subscription(
         "trial" => 10737418240,
         _ => 26843545600,
     };
-    let expire_at = Utc::now() + chrono::Duration::days(days as i64);
+    let moscow_offset = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
+    let now = Utc::now().with_timezone(&moscow_offset);
+    let expire_at = now + chrono::Duration::days(days as i64);
+    
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
     let api_response = match HTTP_CLIENT
