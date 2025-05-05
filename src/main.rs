@@ -69,7 +69,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         json_response["response"]["uuid"]
         .as_str()
         .unwrap()
-    );
+    ).unwrap();
 
     let sub_url = json_response["response"]["subscriptionUrl"]
         .as_str()
