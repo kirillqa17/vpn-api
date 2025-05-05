@@ -485,30 +485,37 @@ async fn get_traffic(telegram_id: web::Path<i64>) -> HttpResponse {
 }
 
 async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
-    let result = sqlx::query_as!(
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    let users = match sqlx::query_as!(
         ExpiringUser,
         r#"
         SELECT telegram_id, subscription_end, username, plan
-        FROM users 
+    FROM users 
         WHERE 
             is_active = 1 AND 
             subscription_end < NOW()
         ORDER BY subscription_end ASC
         "#
     )
-    .fetch_all(pool.get_ref())
-    .await;
+    .fetch_all(&mut *tx)
+    .await {
+        Ok(users) => users,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+    };
 
-    match result {
-        Ok(users) => HttpResponse::Ok().json(users),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
-    }
     if users.is_empty() {
         let _ = tx.commit().await;
         return HttpResponse::Ok().json(users);
     }
 
-    // 2. Обновляем статус is_active для найденных пользователей
     let telegram_ids: Vec<i64> = users.iter().map(|u| u.telegram_id).collect();
     
     match sqlx::query!(
@@ -527,6 +534,8 @@ async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
             return HttpResponse::InternalServerError().body(e.to_string());
         }
     };
+    
+    HttpResponse::Ok().json(users)
 }
 
 #[actix_web::main]
