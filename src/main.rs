@@ -363,6 +363,33 @@ async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::J
     result
 }
 
+async fn ref_bonus(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::Json<bool>) -> HttpResponse {
+    let is_used_trial = data.into_inner();
+    let telegram_id = telegram_id.into_inner();
+    let result = match sqlx::query!(
+        r#"
+        UPDATE users 
+        SET is_used_ref_bonus = $1
+        WHERE telegram_id = $2
+        "#,
+        is_used_trial,
+        telegram_id
+    )
+    .execute(pool.get_ref())
+    .await {
+        Ok(result) => {
+            if result.rows_affected() == 0 {
+                HttpResponse::NotFound().body("User not found")
+            }   
+            else {
+                HttpResponse::Ok().body("Referral bonus status updated successfully")
+            }
+        }
+        Err(_) => HttpResponse::InternalServerError().body("Failed to update referral bonus status")
+    };
+    result
+}
+
 async fn get_sub_link(telegram_id: web::Path<i64>) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
     let api_response = match HTTP_CLIENT
@@ -448,6 +475,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
             .service(web::resource("/users/{telegram_id}/get_sub").route(web::get().to(get_sub_link)))
             .service(web::resource("/users/{telegram_id}/traffic").route(web::get().to(get_traffic)))
+            .service(web::resource("/users/{telegram_id}/ref_bonus").route(web::patch().to(ref_bonus)))
     })
     .bind("127.0.0.1:8080")?
     .run()
