@@ -446,8 +446,8 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
-            .service(web::resource("/users/{telegram_id}/get_sub").route(web::patch().to(get_sub_link)))
-            .service(web::resource("/users/{telegram_id}/traffic").route(web::patch().to(get_traffic)))
+            .service(web::resource("/users/{telegram_id}/get_sub").route(web::get().to(get_sub_link)))
+            .service(web::resource("/users/{telegram_id}/traffic").route(web::get().to(get_traffic)))
     })
     .bind("127.0.0.1:8080")?
     .run()
