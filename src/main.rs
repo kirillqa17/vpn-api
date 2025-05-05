@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 lazy_static::lazy_static! {
     static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
-    static ref REMNAWAVE_API_BASE: String = std::env::var("REMNAWAVE_API_BASE").unwrap_or_else(|_| "https://svoivpn.duckdns.org/api".to_string());
+    static ref REMNAWAVE_API_BASE: String = std::env::var("REMNAWAVE_API_BASE").unwrap_or_else(|_| "http://localhost:3000/api".to_string());
     static ref REMNAWAVE_API_KEY: String = std::env::var("REMNAWAVE_API_KEY").expect("REMNAWAVE_API_KEY must be set");
 }
 
@@ -534,7 +534,7 @@ async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
             return HttpResponse::InternalServerError().body(e.to_string());
         }
     };
-    
+
     HttpResponse::Ok().json(users)
 }
 
