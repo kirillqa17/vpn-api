@@ -4,7 +4,7 @@ use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
 mod models;
-use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest};
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser};
 use std::collections::HashMap;
 
 lazy_static::lazy_static! {
