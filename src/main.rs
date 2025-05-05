@@ -65,10 +65,11 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
     };
 
-    let uuid = json_response["response"]["uuid"]
+    let uuid = Uuid::parse_str(
+        json_response["response"]["uuid"]
         .as_str()
         .unwrap()
-        .to_string();
+    );
 
     let sub_url = json_response["response"]["subscriptionUrl"]
         .as_str()
