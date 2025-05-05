@@ -5,7 +5,7 @@ use uuid::Uuid;
 use chrono::Utc;
 mod models;
 use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest};
-
+use std::collections::HashMap;
 
 lazy_static::lazy_static! {
     static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
@@ -421,6 +421,40 @@ async fn get_sub_link(telegram_id: web::Path<i64>) -> HttpResponse {
     
 }
 
+async fn get_expiring_users(
+    pool: web::Data<PgPool>,
+    query: web::Query<HashMap<String, String>>,
+) -> HttpResponse {
+    // Получаем параметр days из query (по умолчанию 3 дня)
+    let days_before = query
+        .get("days")
+        .and_then(|d| d.parse::<i64>().ok())
+        .unwrap_or(3);
+
+    // Рассчитываем дату, после которой подписка считается истекающей
+    let threshold_date = Utc::now() + chrono::Duration::days(days_before);
+
+    let result = sqlx::query_as!(
+        ExpiringUser,
+        r#"
+        SELECT telegram_id, subscription_end, username, plan
+        FROM users 
+        WHERE 
+            is_active = 1 AND 
+            subscription_end BETWEEN NOW() AND $1
+        ORDER BY subscription_end ASC
+        "#,
+        threshold_date
+    )
+    .fetch_all(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(users) => HttpResponse::Ok().json(users),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
 async fn get_traffic(telegram_id: web::Path<i64>) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
     let api_response = match HTTP_CLIENT
@@ -450,6 +484,51 @@ async fn get_traffic(telegram_id: web::Path<i64>) -> HttpResponse {
     
 }
 
+async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
+    let result = sqlx::query_as!(
+        ExpiringUser,
+        r#"
+        SELECT telegram_id, subscription_end, username, plan
+        FROM users 
+        WHERE 
+            is_active = 1 AND 
+            subscription_end < NOW()
+        ORDER BY subscription_end ASC
+        "#
+    )
+    .fetch_all(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(users) => HttpResponse::Ok().json(users),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+    if users.is_empty() {
+        let _ = tx.commit().await;
+        return HttpResponse::Ok().json(users);
+    }
+
+    // 2. Обновляем статус is_active для найденных пользователей
+    let telegram_ids: Vec<i64> = users.iter().map(|u| u.telegram_id).collect();
+    
+    match sqlx::query!(
+        r#"
+        UPDATE users
+        SET is_active = 0
+        WHERE telegram_id = ANY($1)
+        "#,
+        &telegram_ids
+    )
+    .execute(&mut *tx)
+    .await {
+        Ok(_) => (),
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+    };
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
@@ -476,6 +555,8 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/{telegram_id}/get_sub").route(web::get().to(get_sub_link)))
             .service(web::resource("/users/{telegram_id}/traffic").route(web::get().to(get_traffic)))
             .service(web::resource("/users/{telegram_id}/ref_bonus").route(web::patch().to(ref_bonus)))
+            .service(web::resource("/users/expiring").route(web::get().to(get_expiring_users)))
+            .service(web::resource("/users/expired").route(web::get().to(get_expired_users)))
     })
     .bind("127.0.0.1:8080")?
     .run()

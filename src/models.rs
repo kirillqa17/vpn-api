@@ -41,3 +41,12 @@ pub struct ExtendSubscriptionRequest {
     pub days: u32,
     pub plan: String,
 }
+
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExpiringUser {
+    pub telegram_id: i64,
+    pub subscription_end: DateTime<Utc>,
+    pub username: Option<String>,
+    pub plan: String,
+}
