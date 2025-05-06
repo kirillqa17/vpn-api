@@ -440,6 +440,8 @@ async fn get_traffic(telegram_id: web::Path<i64>) -> HttpResponse {
     .get(&format!("{}/users/tg/{}", *REMNAWAVE_API_BASE, telegram_id))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
+    .header("X-Forwarded-For", "127.0.0.1")
+    .header("X-Forwarded-Proto", "https")
     .send()
     .await
     {
