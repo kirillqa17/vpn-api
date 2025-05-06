@@ -39,6 +39,8 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         .post(&format!("{}/users", *REMNAWAVE_API_BASE))
         .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
         .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "127.0.0.1")
+        .header("X-Forwarded-Proto", "https")
         .json(&json!({
             "username": username,
             "status": "DISABLED",
@@ -179,13 +181,15 @@ async fn extend_subscription(
     let moscow_offset = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
     let now = Utc::now().with_timezone(&moscow_offset);
     let expire_at = now + chrono::Duration::days(days as i64);
-    
+
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
     let api_response = match HTTP_CLIENT
         .post(&format!("{}/users/update", *REMNAWAVE_API_BASE))
         .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
         .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "127.0.0.1")
+        .header("X-Forwarded-Proto", "https")
         .json(&json!({
             "uuid": uuid,
             "status": "ACTIVE",
