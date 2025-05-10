@@ -401,40 +401,6 @@ async fn ref_bonus(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: we
     result
 }
 
-async fn get_expiring_users(
-    pool: web::Data<PgPool>,
-    query: web::Query<HashMap<String, String>>,
-) -> HttpResponse {
-    // Получаем параметр days из query (по умолчанию 3 дня)
-    let days_before = query
-        .get("days")
-        .and_then(|d| d.parse::<i64>().ok())
-        .unwrap_or(3);
-
-    // Рассчитываем дату, после которой подписка считается истекающей
-    let threshold_date = Utc::now() + chrono::Duration::days(days_before);
-
-    let result = sqlx::query_as!(
-        ExpiringUser,
-        r#"
-        SELECT telegram_id, subscription_end, username, plan
-        FROM users 
-        WHERE 
-            is_active = 1 AND 
-            subscription_end BETWEEN NOW() AND $1
-        ORDER BY subscription_end ASC
-        "#,
-        threshold_date
-    )
-    .fetch_all(pool.get_ref())
-    .await;
-
-    match result {
-        Ok(users) => HttpResponse::Ok().json(users),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
-    }
-}
-
 async fn get_traffic(telegram_id: web::Path<i64>) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
     let api_response = match HTTP_CLIENT
@@ -464,6 +430,40 @@ async fn get_traffic(telegram_id: web::Path<i64>) -> HttpResponse {
     
     HttpResponse::Ok().json(json!({ "traffic_left": traffic_limit - traffic_used }))
     
+}
+
+async fn get_expiring_users(
+    pool: web::Data<PgPool>,
+    query: web::Query<HashMap<String, String>>,
+) -> HttpResponse {
+    // Получаем параметр days из query (по умолчанию 3 дня)
+    let days_before = query
+        .get("days")
+        .and_then(|d| d.parse::<i64>().ok())
+        .unwrap_or(1);
+
+    // Рассчитываем дату, после которой подписка считается истекающей
+    let threshold_date = Utc::now() + chrono::Duration::days(days_before);
+
+    let result = sqlx::query_as!(
+        ExpiringUser,
+        r#"
+        SELECT telegram_id, subscription_end, username, plan
+        FROM users 
+        WHERE 
+            is_active = 1 AND 
+            subscription_end BETWEEN NOW() AND $1
+        ORDER BY subscription_end ASC
+        "#,
+        threshold_date
+    )
+    .fetch_all(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(users) => HttpResponse::Ok().json(users),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
 }
 
 async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
@@ -516,6 +516,10 @@ async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
             return HttpResponse::InternalServerError().body(e.to_string());
         }
     };
+    
+    if let Err(e) = tx.commit().await {
+        return HttpResponse::InternalServerError().body(e.to_string());
+    }
 
     HttpResponse::Ok().json(users)
 }
