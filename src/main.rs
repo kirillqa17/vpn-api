@@ -459,6 +459,7 @@ async fn get_expiring_users(
             subscription_end BETWEEN NOW() AND $1
         ORDER BY subscription_end ASC
         "#,
+        threshold_date
     )
     .fetch_all(&mut *tx)
     .await {
