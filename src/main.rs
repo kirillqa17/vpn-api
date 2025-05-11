@@ -436,7 +436,6 @@ async fn get_expiring_users(
     pool: web::Data<PgPool>,
     query: web::Query<HashMap<String, String>>,
 ) -> HttpResponse {
-    // Получаем параметр days из query (по умолчанию 3 дня)
     let days_before = query
         .get("days")
         .and_then(|d| d.parse::<i64>().ok())
@@ -445,7 +444,12 @@ async fn get_expiring_users(
     // Рассчитываем дату, после которой подписка считается истекающей
     let threshold_date = Utc::now() + chrono::Duration::days(days_before);
 
-    let result = sqlx::query_as!(
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    let users = match sqlx::query_as!(
         ExpiringUser,
         r#"
         SELECT telegram_id, subscription_end, username, plan
@@ -455,15 +459,45 @@ async fn get_expiring_users(
             subscription_end BETWEEN NOW() AND $1
         ORDER BY subscription_end ASC
         "#,
-        threshold_date
     )
-    .fetch_all(pool.get_ref())
-    .await;
+    .fetch_all(&mut *tx)
+    .await {
+        Ok(users) => users,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+    };
 
-    match result {
-        Ok(users) => HttpResponse::Ok().json(users),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    if users.is_empty() {
+        let _ = tx.commit().await;
+        return HttpResponse::Ok().json(users);
     }
+
+    let telegram_ids: Vec<i64> = users.iter().map(|u| u.telegram_id).collect();
+    
+    match sqlx::query!(
+        r#"
+        UPDATE users
+        SET is_active = 2
+        WHERE telegram_id = ANY($1)
+        "#,
+        &telegram_ids
+    )
+    .execute(&mut *tx)
+    .await {
+        Ok(_) => (),
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+    };
+    
+    if let Err(e) = tx.commit().await {
+        return HttpResponse::InternalServerError().body(e.to_string());
+    }
+    
+    HttpResponse::Ok().json(users)
 }
 
 async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
@@ -479,7 +513,7 @@ async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
         SELECT telegram_id, subscription_end, username, plan
     FROM users 
         WHERE 
-            is_active = 1 AND 
+            is_active = 2 AND 
             subscription_end < NOW()
         ORDER BY subscription_end ASC
         "#
