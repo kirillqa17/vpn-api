@@ -476,7 +476,8 @@ async fn get_expiring_users(
     }
 
     let telegram_ids: Vec<i64> = users.iter().map(|u| u.telegram_id).collect();
-    
+    println!("Found {} expiring users", users.len());
+println!("Updating is_active for users: {:?}", telegram_ids);
     match sqlx::query!(
         r#"
         UPDATE users
