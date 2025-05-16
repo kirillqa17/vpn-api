@@ -149,15 +149,11 @@ async fn extend_subscription(
     telegram_id: web::Path<i64>,
     request: web::Json<ExtendSubscriptionRequest>,
 ) -> HttpResponse {
-    println!("[extend_subscription] Начало обработки запроса");
     let telegram_id = telegram_id.into_inner();
     let days = request.days;
     let plan = request.plan.clone();
 
-    println!("[extend_subscription] Параметры: telegram_id={}, days={}, plan={}", telegram_id, days, plan);
-
     // Получаем uuid пользователя
-    println!("[extend_subscription] Получаем данные пользователя из БД");
     let user = match sqlx::query!(
         "SELECT * FROM users WHERE telegram_id = $1",
         telegram_id
@@ -165,25 +161,17 @@ async fn extend_subscription(
     .fetch_one(pool.get_ref())
     .await
     {
-        Ok(record) => {
-            println!("[extend_subscription] Пользователь найден: telegram_id={}, uuid={}", record.telegram_id, record.uuid);
-            record
-        },
-        Err(e) => {
-            println!("[extend_subscription] Ошибка при поиске пользователя: {:?}", e);
-            return HttpResponse::NotFound().body("User not found");
-        },
+        Ok(record) => record,
+        Err(_) => return HttpResponse::NotFound().body("User not found"),
     };
 
     let uuid = user.uuid;
-    println!("[extend_subscription] UUID пользователя: {}", uuid);
 
     let device_limit = match plan.as_str() {
         "base" => 2,
         "family" => 5,
         _ => 2,
     };
-    println!("[extend_subscription] Лимит устройств: {}", device_limit);
 
     let traffic_limit: u64 = match plan.as_str() {
         "base" => 26843545600,
@@ -191,17 +179,12 @@ async fn extend_subscription(
         "trial" => 10737418240,
         _ => 26843545600,
     };
-    println!("[extend_subscription] Лимит трафика: {}", traffic_limit);
-
     let moscow_offset = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
     let now = Utc::now().with_timezone(&moscow_offset);
     let expire_at = now + chrono::Duration::days(days as i64);
+
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
-    println!("[extend_subscription] Текущее время (МСК): {}", now);
-    println!("[extend_subscription] Новая дата окончания подписки: {}", expire_at_str);
-
-    println!("[extend_subscription] Отправляем запрос к Remnawave API");
     let api_response = match HTTP_CLIENT
         .post(&format!("{}/users/update", *REMNAWAVE_API_BASE))
         .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
@@ -223,24 +206,15 @@ async fn extend_subscription(
         .send()
         .await
     {
-        Ok(resp) => {
-            println!("[extend_subscription] Remnawave API ответил: статус {}", resp.status());
-            resp
-        },
-        Err(e) => {
-            println!("[extend_subscription] Ошибка при вызове Remnawave API: {:?}", e);
-            return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e));
-        },
+        Ok(resp) => resp,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
     };
 
     if !api_response.status().is_success() {
-        let status = api_response.status();
-        let error_body = api_response.text().await.unwrap_or_else(|_| "Не удалось прочитать тело ошибки".to_string());
-        println!("[extend_subscription] Remnawave API вернул ошибку: статус {}, тело: {}", status, error_body);
-        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", status));
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
 
-    println!("[extend_subscription] Обновляем подписку в локальной БД");
+    
     let result = sqlx::query_as!(
         User,
         r#"
@@ -258,24 +232,21 @@ async fn extend_subscription(
     )
     .fetch_one(pool.get_ref())
     .await;
-
     match result {
         Ok(user) => {
-            println!("[extend_subscription] Подписка успешно обновлена: telegram_id={}, subscription_end={}, is_active={}, plan={}", 
-                user.telegram_id, user.subscription_end, user.is_active, user.plan);
             HttpResponse::Ok().json(json!({
                 "telegram_id": user.telegram_id,
                 "uuid": uuid,
                 "subscription_end": user.subscription_end,
                 "is_active": user.is_active,
-                "plan": user.plan
+                "plan":user.plan
             }))
         },
-        Err(e) => {
-            println!("[extend_subscription] Ошибка при обновлении БД: {:?}", e);
-            HttpResponse::InternalServerError().body("Failed to update database")
+        Err(_e) => {
+            return HttpResponse::InternalServerError().body("Failed to update database");
         }
     }
+    
 }
 
 
