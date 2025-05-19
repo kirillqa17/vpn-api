@@ -174,10 +174,10 @@ async fn extend_subscription(
     };
 
     let traffic_limit: u64 = match plan.as_str() {
-        "base" => 53687091200,
-        "family" => 214748364800,
+        "base" => 0,
+        "family" => 0,
         "trial" => 10737418240,
-        _ => 53687091200,
+        _ => 0,
     };
     let moscow_offset = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
     let now = Utc::now().with_timezone(&moscow_offset);
