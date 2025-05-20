@@ -6,6 +6,8 @@ use chrono::Utc;
 mod models;
 use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser};
 use std::collections::HashMap;
+use std::time::Duration;
+use tokio::time::sleep;
 
 lazy_static::lazy_static! {
     static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
@@ -586,6 +588,76 @@ async fn payed_refs(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: w
     result
 }
 
+async fn temp_disable_device_limit(
+    pool: web::Data<PgPool>,
+    telegram_id: web::Path<i64>,
+) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+
+    // Сначала получаем текущий device_limit пользователя
+    let user = match sqlx::query_as!(
+        User,
+        "SELECT * FROM users WHERE telegram_id = $1",
+        telegram_id
+    )
+    .fetch_one(pool.get_ref())
+    .await {
+        Ok(user) => user,
+        Err(_) => return HttpResponse::NotFound().body("User not found"),
+    };
+
+    // Сохраняем оригинальное значение в глобальной мапе
+    let original_limit = user.device_limit;
+    // Получаем uuid пользователя
+    let uuid = user.uuid;
+
+    // Устанавливаем временный лимит в 0
+    let api_response = match HTTP_CLIENT
+        .post(&format!("{}/users/update", *REMNAWAVE_API_BASE))
+        .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "127.0.0.1")
+        .header("X-Forwarded-Proto", "https")
+        .json(&json!({
+            "uuid": uuid,
+            "hwidDeviceLimit": 0
+        }))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+    };
+
+    if !api_response.status().is_success() {
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+    }
+
+    // Запускаем асинхронную задачу для восстановления лимита через 30 минут
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(30 * 60)).await; // 30 минут
+
+        let _ = HTTP_CLIENT
+            .post(&format!("{}/users/update", *REMNAWAVE_API_BASE))
+            .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+            .header("Content-Type", "application/json")
+            .header("X-Forwarded-For", "127.0.0.1")
+            .header("X-Forwarded-Proto", "https")
+            .json(&json!({
+                "uuid": uuid,
+                "hwidDeviceLimit": original_limit
+            }))
+            .send()
+            .await;
+    });
+
+    HttpResponse::Ok().json(json!({
+        "message": "Device limit temporarily set to 0 for 30 minutes",
+        "original_limit": original_limit,
+        "telegram_id": telegram_id
+    }))
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
@@ -614,6 +686,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/expiring").route(web::get().to(get_expiring_users)))
             .service(web::resource("/users/expired").route(web::get().to(get_expired_users)))
             .service(web::resource("/users/{telegram_id}/refs").route(web::patch().to(payed_refs)))
+            .service(web::resource("/users/{telegram_id}/disable_device").route(web::post().to(temp_disable_device_limit)))
     })
     .bind("127.0.0.1:8080")?
     .run()

@@ -23,6 +23,7 @@ pub struct User {
     pub plan: String,
     pub sub_link: String,
     pub payed_refs: i64,
+    pub device_limit: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
