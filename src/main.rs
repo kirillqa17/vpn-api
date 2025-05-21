@@ -178,7 +178,7 @@ async fn extend_subscription(
     let traffic_limit: u64 = match plan.as_str() {
         "base" => 0,
         "family" => 0,
-        "trial" => 10737418240,
+        "trial" => 26843545600,
         _ => 0,
     };
     let moscow_offset = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
