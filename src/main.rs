@@ -168,6 +168,7 @@ async fn extend_subscription(
     };
 
     let uuid = user.uuid;
+    let current_days = user.subscription_end;
 
     let device_limit = match plan.as_str() {
         "base" => 2,
@@ -181,9 +182,7 @@ async fn extend_subscription(
         "trial" => 26843545600,
         _ => 0,
     };
-    let moscow_offset = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
-    let now = Utc::now().with_timezone(&moscow_offset);
-    let expire_at = now + chrono::Duration::days(days as i64);
+    let expire_at = current_days + chrono::Duration::days(days as i64);
 
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
