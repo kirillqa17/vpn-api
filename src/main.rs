@@ -35,7 +35,9 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     }
 
     let referral_id = data.referral_id;
-    let username = data.username.clone();
+    let username = data.username.clone().unwrap_or_else(|| {
+        format!("user_{}", data.telegram_id)
+    });
 
     let api_response = match HTTP_CLIENT
         .post(&format!("{}/users", *REMNAWAVE_API_BASE))
