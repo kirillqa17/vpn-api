@@ -184,6 +184,14 @@ async fn extend_subscription(
         "trial" => 26843545600,
         _ => 0,
     };
+
+    let tag = match plan.as_str(){
+        "base" => "PAID",
+        "family" => "PAID",
+        "trial" => "TRIAL",
+        "free" => "FREE",
+    }
+
     let expire_at = current_days + chrono::Duration::days(days as i64);
 
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -202,6 +210,7 @@ async fn extend_subscription(
             "activeUserInbounds": [
                 "d92c68b5-41e9-47d0-b7ee-89e7c8640a59"
             ],
+            "tag": tag,
             "expireAt": expire_at_str,
             "telegramId": user.telegram_id,
             "hwidDeviceLimit": device_limit
