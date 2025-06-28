@@ -189,7 +189,7 @@ async fn extend_subscription(
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
     let api_response = match HTTP_CLIENT
-        .patch(&format!("{}/users/update", *REMNAWAVE_API_BASE))
+        .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
         .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
         .header("Content-Type", "application/json")
         .header("X-Forwarded-For", "127.0.0.1")
@@ -614,7 +614,7 @@ async fn temp_disable_device_limit(
 
     // Устанавливаем временный лимит в 0
     let api_response = match HTTP_CLIENT
-        .patch(&format!("{}/users/update", *REMNAWAVE_API_BASE))
+        .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
         .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
         .header("Content-Type", "application/json")
         .header("X-Forwarded-For", "127.0.0.1")
@@ -639,7 +639,7 @@ async fn temp_disable_device_limit(
         sleep(Duration::from_secs(30 * 60)).await; // 30 минут
 
         let _ = HTTP_CLIENT
-            .patch(&format!("{}/users/update", *REMNAWAVE_API_BASE))
+            .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
             .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
             .header("Content-Type", "application/json")
             .header("X-Forwarded-For", "127.0.0.1")
