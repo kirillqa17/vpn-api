@@ -190,7 +190,8 @@ async fn extend_subscription(
         "family" => "PAID",
         "trial" => "TRIAL",
         "free" => "FREE",
-    }
+        _ => "UNKNOWN",
+    };
 
     let expire_at = current_days + chrono::Duration::days(days as i64);
 
