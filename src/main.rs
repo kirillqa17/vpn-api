@@ -154,7 +154,7 @@ async fn list_users() -> HttpResponse {
         return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
 
-    let response_body = match api_response.json::<Value>().await {
+    let response_body = match api_response.json::<Vec<i64>>().await {
         Ok(body) => body,
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
     };
