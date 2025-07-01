@@ -1,6 +1,5 @@
 use actix_web::{web, App, HttpResponse, HttpServer};
 use serde_json::json;
-use serde_json::Value;
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
@@ -437,10 +436,12 @@ async fn ref_bonus(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: we
     result
 }
 
-async fn get_traffic(telegram_id: web::Path<i64>) -> HttpResponse {
+
+async fn check_connection(telegram_id: web::Path<i64>) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
+
     let api_response = match HTTP_CLIENT
-    .get(&format!("{}/users/tg/{}", *REMNAWAVE_API_BASE, telegram_id))
+    .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
     .header("X-Forwarded-For", "127.0.0.1")
@@ -461,11 +462,14 @@ async fn get_traffic(telegram_id: web::Path<i64>) -> HttpResponse {
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
     };
 
-    let traffic_limit = json_response["response"][0]["trafficLimitBytes"].as_i64().unwrap();
-    let traffic_used = json_response["response"][0]["usedTrafficBytes"].as_i64().unwrap();
+    let first_connected = json_response["response"][0]["firstConnectedAt"].as_str();
+
+    let connected = match first_connected {
+        Some(_) => true,    
+        None => false      
+    };
     
-    HttpResponse::Ok().json(json!({ "traffic_left": traffic_limit - traffic_used }))
-    
+    HttpResponse::Ok().json(json!({ "connected": connected }))
 }
 
 async fn get_expiring_users(
@@ -715,7 +719,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
-            .service(web::resource("/users/{telegram_id}/traffic").route(web::get().to(get_traffic)))
+            .service(web::resource("/users/{telegram_id}/is_connected").route(web::get().to(check_connection)))
             .service(web::resource("/users/{telegram_id}/ref_bonus").route(web::patch().to(ref_bonus)))
             .service(web::resource("/users/expiring").route(web::get().to(get_expiring_users)))
             .service(web::resource("/users/expired").route(web::get().to(get_expired_users)))
