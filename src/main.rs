@@ -1,5 +1,6 @@
 use actix_web::{web, App, HttpResponse, HttpServer};
 use serde_json::json;
+use serde_json::Value;
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
@@ -154,7 +155,7 @@ async fn list_users() -> HttpResponse {
         return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
 
-    let response_body = match api_response.json::<Vec<i64>>().await {
+    let response_body = match api_response.json::<serde_json::Value>().await {
         Ok(body) => body,
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
     };
