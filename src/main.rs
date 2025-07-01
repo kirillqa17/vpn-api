@@ -136,16 +136,38 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
 }
 
 
-async fn list_users(pool: web::Data<PgPool>) -> HttpResponse {
-    let users = match sqlx::query_as!(User, "SELECT * FROM users")
-        .fetch_all(pool.get_ref())
+async fn list_users() -> HttpResponse {
+    let api_response = match HTTP_CLIENT
+        .get(&format!("{}/users", *REMNAWAVE_API_BASE))
+        .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "127.0.0.1")
+        .header("X-Forwarded-Proto", "https")
+        .send()
         .await
     {
-        Ok(users) => users,
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Ok(resp) => resp,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
     };
 
-    HttpResponse::Ok().json(users)
+    if !api_response.status().is_success() {
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+    }
+
+    let response_body = match api_response.json::<Value>().await {
+        Ok(body) => body,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
+    };
+
+    let telegram_ids: Vec<i64> = response_body["response"]["users"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|user| user["telegramId"].as_i64())
+        .collect();
+
+    HttpResponse::Ok().json(telegram_ids)
+
 }
 
 async fn extend_subscription(
