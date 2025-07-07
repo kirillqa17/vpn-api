@@ -676,12 +676,13 @@ async fn temp_disable_device_limit(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    println!("Server starting...");
     dotenv::dotenv().ok();
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
-
+    println!("DB connected. Starting HTTP server...");
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -704,7 +705,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/{telegram_id}/refs").route(web::patch().to(payed_refs)))
             .service(web::resource("/users/{telegram_id}/disable_device").route(web::post().to(temp_disable_device_limit)))
     })
-    .bind("127.0.0.1:8080")?
+    .bind("0.0.0.0:8080")?
     .run()
     .await
 }
