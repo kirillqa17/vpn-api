@@ -192,7 +192,7 @@ async fn extend_subscription(
         _ => "UNKNOWN",
     };
 
-    let now_utc = Utc::now().naive_utc();
+    let now_utc = Utc::now();
     let effective_start_time = std::cmp::max(user.subscription_end, now_utc);
     let expire_at = effective_start_time + Duration::days(days.into());
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -651,8 +651,7 @@ async fn temp_disable_device_limit(
 
     // Запускаем асинхронную задачу для восстановления лимита через 30 минут
     tokio::spawn(async move {
-        sleep(Duration::from_secs(30 * 60)).await; // 30 минут
-
+        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
         let _ = HTTP_CLIENT
             .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
             .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
