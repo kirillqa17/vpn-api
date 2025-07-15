@@ -2,3 +2,4 @@
 .env
 /certs
 Cargo.lock
+.gitignore
