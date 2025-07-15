@@ -6,7 +6,7 @@ use chrono::Utc;
 mod models;
 use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser};
 use std::collections::HashMap;
-use std::time::Duration;
+use chrono::{Duration, NaiveDateTime};
 use tokio::time::sleep;
 
 lazy_static::lazy_static! {
@@ -170,7 +170,6 @@ async fn extend_subscription(
     };
 
     let uuid = user.uuid;
-    let current_days = user.subscription_end;
 
     let device_limit = match plan.as_str() {
         "base" => 2,
@@ -193,8 +192,9 @@ async fn extend_subscription(
         _ => "UNKNOWN",
     };
 
-    let expire_at = current_days + chrono::Duration::days(days as i64);
-
+    let now_utc = Utc::now().naive_utc();
+    let effective_start_time = std::cmp::max(user.subscription_end, now_utc);
+    let expire_at = effective_start_time + Duration::days(days.into());
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
     let api_response = match HTTP_CLIENT
