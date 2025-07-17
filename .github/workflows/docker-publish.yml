@@ -55,6 +55,6 @@ jobs:
             echo "Running new container..."
             # Запускаем новый контейнер, привязывая порты (пример: 8080 на хосте к 8080 в контейнере)
             # Убедитесь, что порты соответствуют вашему приложению
-            docker run -d --name vpn-api-container -p 8080:8080 ${{ secrets.DOCKER_USERNAME }}/vpn-api:latest
+            docker run -d --name vpn-api-container --env-file /home/root/SvoiVPN/.env ${{ secrets.DOCKER_USERNAME }}/vpn-api:latest
 
             echo "Deployment complete!"
