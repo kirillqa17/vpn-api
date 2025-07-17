@@ -2510,7 +2510,7 @@ dependencies = [
  "actix-web",
  "chrono",
  "dotenv",
- "once_cell",
+ "lazy_static",
  "reqwest",
  "serde",
  "serde_json",

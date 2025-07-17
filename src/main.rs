@@ -4,24 +4,16 @@ use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
 mod models;
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser};
 use std::collections::HashMap;
-// Удалены неиспользуемые импорты ExpiringUser и User, так как они используются в query_as!, но напрямую в коде их нет
-// Оставим только те, что явно используются для аргументов функций или struct
-use models::{NewUser, AddReferralData, ExtendSubscriptionRequest};
-// Удален NaiveDateTime, так как он не используется напрямую
-use chrono::Duration;
-// Удален tokio::time::sleep, так как он используется через tokio::time::sleep
-// use tokio::time::sleep;
-use once_cell::sync::{OnceCell, Lazy};
+use chrono::{Duration, NaiveDateTime};
+use tokio::time::sleep;
 
-// Инициализируем HTTP_CLIENT как OnceCell
-static HTTP_CLIENT: OnceCell<reqwest::Client> = OnceCell::new();
-static REMNAWAVE_API_BASE: Lazy<String> = Lazy::new(|| {
-    std::env::var("REMNAWAVE_API_BASE").unwrap_or_else(|_| "http://localhost:3000/api".to_string())
-});
-static REMNAWAVE_API_KEY: Lazy<String> = Lazy::new(|| {
-    std::env::var("REMNAWAVE_API_KEY").expect("REMNAWAVE_API_KEY must be set")
-});
+lazy_static::lazy_static! {
+    static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
+    static ref REMNAWAVE_API_BASE: String = std::env::var("REMNAWAVE_API_BASE").unwrap_or_else(|_| "http://localhost:3000/api".to_string());
+    static ref REMNAWAVE_API_KEY: String = std::env::var("REMNAWAVE_API_KEY").expect("REMNAWAVE_API_KEY must be set");
+}
 
 async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
     // Сначала проверяем существование пользователя в нашей БД
@@ -47,8 +39,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         format!("user_{}", data.telegram_id)
     });
 
-    // ИСПРАВЛЕНИЕ: Вызываем .get().expect() для получения экземпляра reqwest::Client
-    let api_response = match HTTP_CLIENT.get().expect("HTTP_CLIENT не инициализирован")
+    let api_response = match HTTP_CLIENT
         .post(&format!("{}/users", *REMNAWAVE_API_BASE))
         .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
         .header("Content-Type", "application/json")
@@ -98,7 +89,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
 
     // Создаем пользователя в нашей БД
     let user = match sqlx::query_as!(
-        models::User, // Указываем полный путь к типу User
+        User,
         r#"
         INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points, is_used_ref_bonus, game_attempts, username, sub_link, payed_refs)
         VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -126,7 +117,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     if let Some(referral_id) = referral_id {
         let _ = sqlx::query!(
             r#"
-            UPDATE users
+            UPDATE users 
             SET referrals = array_append(referrals, $1)
             WHERE telegram_id = $2
             "#,
@@ -206,8 +197,7 @@ async fn extend_subscription(
     let expire_at = effective_start_time + Duration::days(days.into());
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
-    // ИСПРАВЛЕНИЕ: Вызываем .get().expect() для получения экземпляра reqwest::Client
-    let api_response = match HTTP_CLIENT.get().expect("HTTP_CLIENT не инициализирован")
+    let api_response = match HTTP_CLIENT
         .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
         .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
         .header("Content-Type", "application/json")
@@ -239,7 +229,7 @@ async fn extend_subscription(
 
     
     let result = sqlx::query_as!(
-        models::User, // Указываем полный путь к типу User
+        User,
         r#"
         UPDATE users 
         SET 
@@ -355,7 +345,7 @@ async fn get_user_info(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> 
     let telegram_id = telegram_id.into_inner();
 
     let result = sqlx::query_as!(
-        models::User, // Указываем полный путь к типу User
+        User,
         r#"
         SELECT * FROM users WHERE telegram_id = $1
         "#,
@@ -428,9 +418,7 @@ async fn ref_bonus(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: we
 async fn check_connection(telegram_id: web::Path<i64>) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
 
-    // ИСПРАВЛЕНИЕ: Вызываем .get().expect() для получения экземпляра reqwest::Client,
-    // и передаем URL как аргумент в метод .get() клиента reqwest
-    let api_response = match HTTP_CLIENT.get().expect("HTTP_CLIENT не инициализирован")
+    let api_response = match HTTP_CLIENT
     .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
@@ -480,7 +468,7 @@ async fn get_expiring_users(
     };
 
     let users = match sqlx::query_as!(
-        models::ExpiringUser, // Указываем полный путь к типу ExpiringUser
+        ExpiringUser,
         r#"
         SELECT telegram_id, subscription_end, username, plan
         FROM users 
@@ -539,7 +527,7 @@ async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
     };
 
     let users = match sqlx::query_as!(
-        models::ExpiringUser, // Указываем полный путь к типу ExpiringUser
+        ExpiringUser,
         r#"
         SELECT telegram_id, subscription_end, username, plan
     FROM users 
@@ -623,7 +611,7 @@ async fn temp_disable_device_limit(
     let telegram_id = telegram_id.into_inner();
 
     let user = match sqlx::query_as!(
-        models::User, // Указываем полный путь к типу User
+        User,
         "SELECT * FROM users WHERE telegram_id = $1",
         telegram_id
     )
@@ -634,14 +622,12 @@ async fn temp_disable_device_limit(
     };
 
     // Сохраняем оригинальное значение в глобальной мапе
-    // ИСПРАВЛЕНИЕ: Имя поля должно быть hwid_device_limit, а не device_limit
-    let original_limit = user.hwid_device_limit;
+    let original_limit = user.device_limit;
     // Получаем uuid пользователя
     let uuid = user.uuid;
 
     // Устанавливаем временный лимит в 0
-    // ИСПРАВЛЕНИЕ: Вызываем .get().expect() для получения экземпляра reqwest::Client
-    let api_response = match HTTP_CLIENT.get().expect("HTTP_CLIENT не инициализирован")
+    let api_response = match HTTP_CLIENT
         .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
         .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
         .header("Content-Type", "application/json")
@@ -665,8 +651,7 @@ async fn temp_disable_device_limit(
     // Запускаем асинхронную задачу для восстановления лимита через 30 минут
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
-        // ИСПРАВЛЕНИЕ: Вызываем .get().expect() для получения экземпляра reqwest::Client
-        let _ = HTTP_CLIENT.get().expect("HTTP_CLIENT не инициализирован")
+        let _ = HTTP_CLIENT
             .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
             .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
             .header("Content-Type", "application/json")
@@ -691,10 +676,6 @@ async fn temp_disable_device_limit(
 async fn main() -> std::io::Result<()> {
     println!("Server starting...");
     dotenv::dotenv().ok();
-
-    // ИСПРАВЛЕНИЕ: Инициализация HTTP_CLIENT
-    HTTP_CLIENT.set(reqwest::Client::new()).expect("Failed to initialize HTTP_CLIENT");
-
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect(&std::env::var("DATABASE_URL").unwrap())
         .await
