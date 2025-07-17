@@ -703,7 +703,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/{telegram_id}/refs").route(web::patch().to(payed_refs)))
             .service(web::resource("/users/{telegram_id}/disable_device").route(web::post().to(temp_disable_device_limit)))
     })
-    .bind("0.0.0.0:8080")?
+    .bind("0.0.0.0:1704")?
     .run()
     .await
 }
