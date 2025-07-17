@@ -610,7 +610,6 @@ async fn temp_disable_device_limit(
 ) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
 
-    // Сначала получаем текущий device_limit пользователя
     let user = match sqlx::query_as!(
         User,
         "SELECT * FROM users WHERE telegram_id = $1",
