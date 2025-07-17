@@ -6,8 +6,7 @@ use chrono::Utc;
 mod models;
 use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser};
 use std::collections::HashMap;
-use chrono::{Duration, NaiveDateTime};
-use tokio::time::sleep;
+use chrono::{Duration};
 
 lazy_static::lazy_static! {
     static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
