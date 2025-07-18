@@ -10,12 +10,11 @@ RUN rm -rf src
 COPY . .
 # Добавьте отладочные команды здесь
 RUN ls -la 
-RUN cat Cargo.toml 
-RUN cat src/main.rs
-
+RUN cat target/release/vpn-api
 ARG DATABASE_URL
 RUN echo "DEBUG: DATABASE_URL during build is: $DATABASE_URL" 
 RUN cargo build --release
+RUN cat target/release/vpn-api
 
 FROM debian:bookworm-slim
 
