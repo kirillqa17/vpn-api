@@ -2,7 +2,9 @@ FROM rust:latest AS builder
 
 WORKDIR /app
 
-COPY src Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock ./
+COPY src/main.rs src/models.rs ./src/
+ARG DATABASE_URL
 RUN cargo build --release
 RUN rm -rf src
 
@@ -10,7 +12,7 @@ COPY . .
 # Добавьте отладочные команды здесь
 RUN ls -la 
 RUN ls -la target/release
-ARG DATABASE_URL
+
 RUN echo "DEBUG: DATABASE_URL during build is: $DATABASE_URL" 
 RUN cargo build --release
 RUN ls -la target/release
