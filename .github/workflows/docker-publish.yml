@@ -27,6 +27,8 @@ jobs:
           push: true # Разрешить отправку образа
           tags: ${{ secrets.DOCKER_USERNAME }}/vpn-api:latest # Тег образа: ваш_username_dockerhub/vpn-api:latest
           context: . # Контекст сборки (текущая директория)
+          build-args: |
+            DATABASE_URL=${{ secrets.DATABASE_URL }}
 
   deploy:
     needs: build-and-push # Этот job зависит от успешного завершения 'build-and-push'
