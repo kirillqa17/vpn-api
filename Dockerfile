@@ -7,10 +7,14 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release
 RUN rm -rf src
 
-COPY . .
+COPY . . # <--- Здесь копируются все файлы из корня репозитория
+# Добавьте отладочные команды здесь
+RUN ls -la # Показать, что было скопировано в /app
+RUN cat Cargo.toml # Проверить, что Cargo.toml скопирован правильно
 
 ARG DATABASE_URL
-RUN cargo build --release
+RUN echo "DEBUG: DATABASE_URL during build is: $DATABASE_URL" # Убедиться, что ARG передается
+RUN cargo build --release --verbose # Более подробный вывод компиляции
 
 FROM debian:bookworm-slim
 
@@ -21,7 +25,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/vpn-api .
+COPY --from=builder /app/target/release/vpn-api . # <--- Проверьте размер этого файла
+RUN ls -la # Убедиться, что бинарник скопирован
+RUN file ./vpn-api # Проверить тип бинарника (исполняемый ли он)
 
 EXPOSE 8080
 
