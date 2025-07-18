@@ -11,10 +11,11 @@ COPY . .
 # Добавьте отладочные команды здесь
 RUN ls -la 
 RUN cat Cargo.toml 
+RUN cat src/main.rs
 
 ARG DATABASE_URL
 RUN echo "DEBUG: DATABASE_URL during build is: $DATABASE_URL" 
-RUN cargo build --release --verbose
+RUN cargo build --release
 
 FROM debian:bookworm-slim
 
