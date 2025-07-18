@@ -27,7 +27,6 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/vpn-api . 
 RUN ls -la 
-RUN file ./vpn-api 
 
 EXPOSE 8080
 
