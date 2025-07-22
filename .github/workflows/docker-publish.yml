@@ -56,6 +56,6 @@ jobs:
 
             echo "Running new container..."
             # Убедитесь, что порты соответствуют вашему приложению
-            docker run -d --name vpn-api-container --network vpn-net --network-alias vpn-api --restart unless-stopped --env-file /root/SvoiVPN/.env ${{ secrets.DOCKER_USERNAME }}/vpn-api:latest
+            docker run -d --name vpn-api-container --add-host host.docker.internal:host-gateway --network vpn-net --network-alias vpn-api --restart unless-stopped --env-file /root/SvoiVPN/.env ${{ secrets.DOCKER_USERNAME }}/vpn-api:latest
 
             echo "Deployment complete!"
