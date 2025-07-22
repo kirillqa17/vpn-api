@@ -86,7 +86,6 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
-    // Создаем пользователя в нашей БД
     let user = match sqlx::query_as!(
         User,
         r#"
