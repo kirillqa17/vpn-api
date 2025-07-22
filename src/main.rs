@@ -172,7 +172,7 @@ async fn extend_subscription(
 
     let device_limit = match plan.as_str() {
         "base" => 2,
-        "family" => 5,
+        "family" => 10,
         _ => 2,
     };
 
