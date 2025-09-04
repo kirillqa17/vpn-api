@@ -53,6 +53,9 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
             "createdAt": Utc::now(),
             "telegramId": data.telegram_id,
             "hwidDeviceLimit": 2,
+            "activeInternalSquads": [
+                "514a5e22-c599-4f72-81a5-e646f0391db7"
+            ],
         }))
         .send()
         .await
