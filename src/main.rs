@@ -673,7 +673,7 @@ async fn temp_disable_device_limit(
     }))
 }
 
-async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
+async fn get_devices(telegram_id: web::Path<String>) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
 
     let api_response = match HTTP_CLIENT
