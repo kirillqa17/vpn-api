@@ -673,8 +673,32 @@ async fn temp_disable_device_limit(
     }))
 }
 
-async fn get_devices(uuid: web::Path<Uuid>) -> HttpResponse {
-    let uuid = uuid.into_inner();
+async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+
+    let api_response = match HTTP_CLIENT
+    .get(&format!("{}/api/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
+    .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+    .header("Content-Type", "application/json")
+    .header("X-Forwarded-For", "127.0.0.1")
+    .header("X-Forwarded-Proto", "https")
+    .send()
+    .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+    };
+
+    if !api_response.status().is_success() {
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+    }
+
+    let json_response = match api_response.json::<serde_json::Value>().await {
+        Ok(json) => json,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
+    };
+
+    let uuid = json_response["response"][0]["uuid"].as_str();
 
     let api_response = match HTTP_CLIENT
     .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, uuid))
