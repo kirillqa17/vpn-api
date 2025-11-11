@@ -673,11 +673,11 @@ async fn temp_disable_device_limit(
     }))
 }
 
-async fn get_devices(telegram_id: web::Path<String>) -> HttpResponse {
-    let telegram_id = telegram_id.into_inner();
+async fn get_devices(uuid: web::Path<Uuid>) -> HttpResponse {
+    let uuid = uuid.into_inner();
 
     let api_response = match HTTP_CLIENT
-    .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, telegram_id))
+    .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, uuid))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
     .header("X-Forwarded-For", "127.0.0.1")
@@ -733,7 +733,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/expired").route(web::get().to(get_expired_users)))
             .service(web::resource("/users/{telegram_id}/refs").route(web::patch().to(payed_refs)))
             .service(web::resource("/users/{telegram_id}/disable_device").route(web::post().to(temp_disable_device_limit)))
-            .service(web::resource("/users/{telegram_id}/get_devices").route(web::get().to(get_devices)))
+            .service(web::resource("/users/{uuid}/get_devices").route(web::get().to(get_devices)))
     })
     .bind("0.0.0.0:8080")?
     .run()
