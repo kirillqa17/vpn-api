@@ -698,10 +698,16 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
     };
 
-    let uuid = json_response["response"][0]["uuid"].as_str();
+    let uuid_str = match json_response["response"][0]["uuid"].as_str() {
+        Some(s) => s,
+        None => {
+            return HttpResponse::InternalServerError()
+                .body("Failed to parse UUID from user API response");
+        }
+    };
 
     let api_response = match HTTP_CLIENT
-    .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, uuid))
+    .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, uuid_str))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
     .header("X-Forwarded-For", "127.0.0.1")
