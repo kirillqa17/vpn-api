@@ -673,6 +673,36 @@ async fn temp_disable_device_limit(
     }))
 }
 
+async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+
+    let api_response = match HTTP_CLIENT
+    .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, telegram_id))
+    .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+    .header("Content-Type", "application/json")
+    .header("X-Forwarded-For", "127.0.0.1")
+    .header("X-Forwarded-Proto", "https")
+    .send()
+    .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+    };
+
+    if !api_response.status().is_success() {
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+    }
+
+    let json_response = match api_response.json::<serde_json::Value>().await {
+        Ok(json) => json,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
+    };
+
+    let devices_amount = json_response["response"]["total"].as_str();
+    
+    HttpResponse::Ok().json(json!({ "devices_amount": devices_amount }))
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     println!("Server starting...");
@@ -703,6 +733,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/expired").route(web::get().to(get_expired_users)))
             .service(web::resource("/users/{telegram_id}/refs").route(web::patch().to(payed_refs)))
             .service(web::resource("/users/{telegram_id}/disable_device").route(web::post().to(temp_disable_device_limit)))
+            .service(web::resource("/users/{telegram_id}/get_devices").route(web::get().to()))
     })
     .bind("0.0.0.0:8080")?
     .run()
