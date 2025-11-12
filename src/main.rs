@@ -706,6 +706,8 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
         }
     };
 
+    println!("{}", uuid_str)
+
     let api_response = match HTTP_CLIENT
     .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, uuid_str))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
@@ -728,7 +730,15 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
     };
 
-    let devices_amount = json_response["response"]["total"].as_str();
+    let devices_amount = json_response["response"]["total"].as_str(){
+        Some(n) => n,
+        None => {
+            return HttpResponse::InternalServerError()
+                .body("Failed to parse devices amount from user API response");
+        }
+    };
+
+    println!("{}", devices_amount)
     
     HttpResponse::Ok().json(json!({ "devices_amount": devices_amount }))
 }
