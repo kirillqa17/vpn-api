@@ -423,8 +423,7 @@ async fn check_connection(telegram_id: web::Path<i64>) -> HttpResponse {
     .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
-    .header("X-Forwarded-For", "127.0.0.1")
-    .header("X-Forwarded-Proto", "https")
+    
     .send()
     .await
     {
@@ -680,17 +679,15 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     .get(&format!("{}/api/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
-    .header("X-Forwarded-For", "127.0.0.1")
-    .header("X-Forwarded-Proto", "https")
     .send()
     .await
     {
         Ok(resp) => resp,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API get user by tg_id: {}", e)),
     };
 
     if !api_response.status().is_success() {
-        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+        return HttpResponse::InternalServerError().body(format!("Remnawave API get user by tg_id error: {}", api_response.status()));
     }
 
     let json_response = match api_response.json::<serde_json::Value>().await {
@@ -710,17 +707,15 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, uuid_str))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
-    .header("X-Forwarded-For", "127.0.0.1")
-    .header("X-Forwarded-Proto", "https")
     .send()
     .await
     {
         Ok(resp) => resp,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call devices remnawave API: {}", e)),
     };
 
     if !api_response.status().is_success() {
-        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+        return HttpResponse::InternalServerError().body(format!("Remnawave devices API error: {}", api_response.status()));
     }
 
     let json_response = match api_response.json::<serde_json::Value>().await {
