@@ -423,7 +423,8 @@ async fn check_connection(telegram_id: web::Path<i64>) -> HttpResponse {
     .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
-    
+    .header("X-Forwarded-For", "127.0.0.1")
+    .header("X-Forwarded-Proto", "https")
     .send()
     .await
     {
@@ -679,6 +680,8 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
+    .header("X-Forwarded-For", "127.0.0.1")
+    .header("X-Forwarded-Proto", "https")
     .send()
     .await
     {
@@ -707,6 +710,8 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, uuid_str))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
+    .header("X-Forwarded-For", "127.0.0.1")
+    .header("X-Forwarded-Proto", "https")
     .send()
     .await
     {
