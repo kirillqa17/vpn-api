@@ -676,7 +676,7 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
 
     let api_response = match HTTP_CLIENT
-    .get(&format!("{}/api/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
+    .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
     .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
     .header("Content-Type", "application/json")
     .send()
