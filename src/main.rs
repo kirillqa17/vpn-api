@@ -698,7 +698,7 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
     };
 
-    let uuid_str = match json_response["response"]["uuid"].as_str() {
+    let uuid_str = match json_response["response"][0]["uuid"].as_str() {
         Some(s) => s,
         None => {
             return HttpResponse::InternalServerError()
