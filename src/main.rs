@@ -706,7 +706,7 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
         }
     };
 
-    println!("{}", uuid_str)
+    println!("{}", uuid_str);
 
     let api_response = match HTTP_CLIENT
     .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, uuid_str))
@@ -738,7 +738,7 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
         }
     };
 
-    println!("{}", devices_amount)
+    println!("{}", devices_amount);
     
     HttpResponse::Ok().json(json!({ "devices_amount": devices_amount }))
 }
