@@ -728,9 +728,9 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
         Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
     };
 
-    let devices_amount = match json_response["response"]["total"].as_str() {
+    let devices_amount = match json_response["response"]["total"].as_u64() {
         Some(n) => n,
-        None => {
+        None => {   
             return HttpResponse::InternalServerError()
                 .body("Failed to parse devices amount from user API response");
         }
