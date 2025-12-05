@@ -649,7 +649,6 @@ async fn temp_disable_device_limit(
         return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
 
-    // Запускаем асинхронную задачу для восстановления лимита через 30 минут
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
         let _ = HTTP_CLIENT
