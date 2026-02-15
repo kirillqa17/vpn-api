@@ -173,24 +173,35 @@ async fn extend_subscription(
     let uuid = user.uuid;
 
     let device_limit = match plan.as_str() {
-        "base" => 2,
-        "family" => 10,
+        "base" | "bsbase" => 2,
+        "family" | "bsfamily" => 10,
         _ => 2,
     };
 
     let traffic_limit: u64 = match plan.as_str() {
-        "base" => 0,
-        "family" => 0,
+        "base" | "bsbase" => 0,
+        "family" | "bsfamily" => 0,
         "trial" => 26843545600,
         _ => 0,
     };
 
     let tag = match plan.as_str(){
-        "base" => "PAID",
-        "family" => "PAID",
+        "base" | "bsbase" => "PAID",
+        "family" | "bsfamily" => "PAID",
         "trial" => "TRIAL",
         "free" => "FREE",
         _ => "UNKNOWN",
+    };
+
+    let squads = if plan.starts_with("bs") {
+        json!([
+            "514a5e22-c599-4f72-81a5-e646f0391db7",
+            "9e60626e-32a8-4d91-a2f8-2aa3fecf7b23"
+        ])
+    } else {
+        json!([
+            "514a5e22-c599-4f72-81a5-e646f0391db7"
+        ])
     };
 
     let now_utc = Utc::now();
@@ -212,6 +223,7 @@ async fn extend_subscription(
             "activeUserInbounds": [
                 "d92c68b5-41e9-47d0-b7ee-89e7c8640a59"
             ],
+            "activeInternalSquads": squads,
             "tag": tag,
             "expireAt": expire_at_str,
             "telegramId": user.telegram_id,
