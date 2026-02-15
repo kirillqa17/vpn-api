@@ -4,7 +4,7 @@ use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
 mod models;
-use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest};
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest};
 use std::collections::HashMap;
 use chrono::{Duration};
 
@@ -92,8 +92,8 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     let user = match sqlx::query_as!(
         User,
         r#"
-        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points, is_used_ref_bonus, game_attempts, username, sub_link, payed_refs)
-        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, referral_id, is_used_trial, game_points, is_used_ref_bonus, game_attempts, username, sub_link, payed_refs, is_pro)
+        VALUES ($1, $2, NOW() + $3 * INTERVAL '1 day', 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         RETURNING *
         "#,
         data.telegram_id,
@@ -107,7 +107,8 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         0i64,
         username,
         sub_url,
-        0
+        0,
+        false
     )
     .fetch_one(&mut *tx)
     .await {
@@ -193,16 +194,15 @@ async fn extend_subscription(
         _ => "UNKNOWN",
     };
 
-    let squads = if plan.starts_with("bs") {
-        json!([
-            "514a5e22-c599-4f72-81a5-e646f0391db7",
-            "9e60626e-32a8-4d91-a2f8-2aa3fecf7b23"
-        ])
-    } else {
-        json!([
-            "514a5e22-c599-4f72-81a5-e646f0391db7"
-        ])
-    };
+    let is_pro = user.is_pro;
+    let mut squad_list = vec!["514a5e22-c599-4f72-81a5-e646f0391db7".to_string()];
+    if plan.starts_with("bs") {
+        squad_list.push("9e60626e-32a8-4d91-a2f8-2aa3fecf7b23".to_string());
+    }
+    if is_pro {
+        squad_list.push("b6a4e86b-b769-4c86-a2d9-f31bbe645029".to_string());
+    }
+    let squads = json!(squad_list);
 
     let now_utc = Utc::now();
     let plan_changed = user.plan != plan && plan != "trial" && plan != "free";
@@ -1104,6 +1104,77 @@ async fn record_auto_renew_attempt(
     }
 }
 
+async fn toggle_pro(
+    pool: web::Data<PgPool>,
+    telegram_id: web::Path<i64>,
+    data: web::Json<ToggleProRequest>,
+) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+    let enable = data.is_pro;
+
+    let user = match sqlx::query_as!(
+        User,
+        "SELECT * FROM users WHERE telegram_id = $1",
+        telegram_id
+    )
+    .fetch_one(pool.get_ref())
+    .await {
+        Ok(user) => user,
+        Err(_) => return HttpResponse::NotFound().body("User not found"),
+    };
+
+    // Собираем список сквадов на основе текущего плана и нового is_pro
+    let mut squad_list = vec!["514a5e22-c599-4f72-81a5-e646f0391db7".to_string()];
+    if user.plan.starts_with("bs") {
+        squad_list.push("9e60626e-32a8-4d91-a2f8-2aa3fecf7b23".to_string());
+    }
+    if enable {
+        squad_list.push("b6a4e86b-b769-4c86-a2d9-f31bbe645029".to_string());
+    }
+
+    // Обновляем сквады в Remnawave
+    let api_response = match HTTP_CLIENT
+        .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
+        .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "127.0.0.1")
+        .header("X-Forwarded-Proto", "https")
+        .json(&json!({
+            "uuid": user.uuid,
+            "activeInternalSquads": json!(squad_list),
+        }))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+    };
+
+    if !api_response.status().is_success() {
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+    }
+
+    // Обновляем is_pro в БД
+    let result = sqlx::query!(
+        "UPDATE users SET is_pro = $1 WHERE telegram_id = $2",
+        enable,
+        telegram_id
+    )
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() == 0 {
+                HttpResponse::NotFound().body("User not found")
+            } else {
+                HttpResponse::Ok().json(json!({"status": "ok", "is_pro": enable}))
+            }
+        }
+        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to update is_pro: {}", e)),
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     println!("Server starting...");
@@ -1141,6 +1212,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::delete().to(delete_payment_method)))
             .service(web::resource("/users/{telegram_id}/auto_renew")
                 .route(web::patch().to(toggle_auto_renew)))
+            .service(web::resource("/users/{telegram_id}/pro")
+                .route(web::patch().to(toggle_pro)))
             .service(web::resource("/users/{telegram_id}/auto_renew_attempt")
                 .route(web::post().to(record_auto_renew_attempt)))
             .service(web::resource("/promos").route(web::post().to(create_promo)).route(web::get().to(list_promos)))

@@ -30,6 +30,7 @@ pub struct User {
     pub auto_renew_duration: Option<String>,
     pub auto_renew_last_attempt: Option<DateTime<Utc>>,
     pub auto_renew_fail_count: i32,
+    pub is_pro: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -122,4 +123,9 @@ pub struct AutoRenewUser {
 #[derive(Debug, Deserialize)]
 pub struct AutoRenewAttemptRequest {
     pub success: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ToggleProRequest {
+    pub is_pro: bool,
 }
