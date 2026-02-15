@@ -205,7 +205,12 @@ async fn extend_subscription(
     };
 
     let now_utc = Utc::now();
-    let effective_start_time = std::cmp::max(user.subscription_end, now_utc);
+    let plan_changed = user.plan != plan && plan != "trial" && plan != "free";
+    let effective_start_time = if plan_changed {
+        now_utc
+    } else {
+        std::cmp::max(user.subscription_end, now_utc)
+    };
     let expire_at = effective_start_time + Duration::days(days.into());
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
@@ -241,23 +246,43 @@ async fn extend_subscription(
     }
 
     
-    let result = sqlx::query_as!(
-        User,
-        r#"
-        UPDATE users 
-        SET 
-            subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day',
-            is_active = 1,
-            plan = $2
-        WHERE telegram_id = $3
-        RETURNING *
-        "#,
-        days as i32,
-        plan,
-        telegram_id
-    )
-    .fetch_one(pool.get_ref())
-    .await;
+    let result = if plan_changed {
+        sqlx::query_as!(
+            User,
+            r#"
+            UPDATE users
+            SET
+                subscription_end = NOW() + $1 * INTERVAL '1 day',
+                is_active = 1,
+                plan = $2
+            WHERE telegram_id = $3
+            RETURNING *
+            "#,
+            days as i32,
+            plan,
+            telegram_id
+        )
+        .fetch_one(pool.get_ref())
+        .await
+    } else {
+        sqlx::query_as!(
+            User,
+            r#"
+            UPDATE users
+            SET
+                subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day',
+                is_active = 1,
+                plan = $2
+            WHERE telegram_id = $3
+            RETURNING *
+            "#,
+            days as i32,
+            plan,
+            telegram_id
+        )
+        .fetch_one(pool.get_ref())
+        .await
+    };
     match result {
         Ok(user) => {
             HttpResponse::Ok().json(json!({
