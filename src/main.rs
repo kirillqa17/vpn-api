@@ -1266,6 +1266,56 @@ async fn toggle_pro(
     }
 }
 
+async fn get_user_squads(telegram_id: web::Path<i64>) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+    info!("[get_user_squads] telegram_id={}", telegram_id);
+
+    let get_response = match HTTP_CLIENT
+        .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
+        .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "127.0.0.1")
+        .header("X-Forwarded-Proto", "https")
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            error!("[get_user_squads] Remnawave API call failed for {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e));
+        }
+    };
+
+    if !get_response.status().is_success() {
+        error!("[get_user_squads] Remnawave API error for {}: {}", telegram_id, get_response.status());
+        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", get_response.status()));
+    }
+
+    let json_response = match get_response.json::<serde_json::Value>().await {
+        Ok(json) => json,
+        Err(e) => {
+            error!("[get_user_squads] Failed to parse response for {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().body(format!("Failed to parse response: {}", e));
+        }
+    };
+
+    let squads: Vec<serde_json::Value> = json_response["response"][0]["activeInternalSquads"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|s| {
+                    let uuid = s["uuid"].as_str().unwrap_or("unknown").to_string();
+                    let tag = s["tag"].as_str().unwrap_or("unknown").to_string();
+                    json!({"uuid": uuid, "tag": tag})
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    info!("[get_user_squads] User {} has {} squads", telegram_id, squads.len());
+    HttpResponse::Ok().json(json!({"squads": squads}))
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -1306,6 +1356,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::patch().to(toggle_auto_renew)))
             .service(web::resource("/users/{telegram_id}/pro")
                 .route(web::patch().to(toggle_pro)))
+            .service(web::resource("/users/{telegram_id}/squads")
+                .route(web::get().to(get_user_squads)))
             .service(web::resource("/users/{telegram_id}/auto_renew_attempt")
                 .route(web::post().to(record_auto_renew_attempt)))
             .service(web::resource("/promos").route(web::post().to(create_promo)).route(web::get().to(list_promos)))
