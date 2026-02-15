@@ -53,3 +53,36 @@ pub struct ExpiringUser {
     pub username: Option<String>,
     pub plan: String,
 }
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PromoCode {
+    pub id: i32,
+    pub code: String,
+    pub discount_percent: i32,
+    pub applicable_tariffs: Vec<String>,
+    pub max_uses: i32,
+    pub current_uses: i32,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePromoRequest {
+    pub code: String,
+    pub discount_percent: i32,
+    pub applicable_tariffs: Vec<String>,
+    pub max_uses: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ValidatePromoRequest {
+    pub code: String,
+    pub tariff: String,
+    pub telegram_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UsePromoRequest {
+    pub code: String,
+    pub telegram_id: i64,
+}

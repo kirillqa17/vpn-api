@@ -4,7 +4,7 @@ use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
 mod models;
-use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser};
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest};
 use std::collections::HashMap;
 use chrono::{Duration};
 
@@ -750,6 +750,150 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     HttpResponse::Ok().json(json!({ "devices_amount": devices_amount }))
 }
 
+async fn create_promo(pool: web::Data<PgPool>, data: web::Json<CreatePromoRequest>) -> HttpResponse {
+    let result = sqlx::query_as!(
+        PromoCode,
+        r#"
+        INSERT INTO promo_codes (code, discount_percent, applicable_tariffs, max_uses)
+        VALUES ($1, $2, $3, $4)
+        RETURNING *
+        "#,
+        data.code,
+        data.discount_percent,
+        &data.applicable_tariffs,
+        data.max_uses
+    )
+    .fetch_one(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(promo) => HttpResponse::Ok().json(promo),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to create promo code: {}", e)),
+    }
+}
+
+async fn list_promos(pool: web::Data<PgPool>) -> HttpResponse {
+    let result = sqlx::query_as!(
+        PromoCode,
+        r#"SELECT * FROM promo_codes ORDER BY created_at DESC"#
+    )
+    .fetch_all(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(promos) => HttpResponse::Ok().json(promos),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to list promo codes: {}", e)),
+    }
+}
+
+async fn deactivate_promo(pool: web::Data<PgPool>, code: web::Path<String>) -> HttpResponse {
+    let code = code.into_inner();
+    let result = sqlx::query!(
+        r#"UPDATE promo_codes SET is_active = false WHERE code = $1"#,
+        code
+    )
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() == 0 {
+                HttpResponse::NotFound().body("Promo code not found")
+            } else {
+                HttpResponse::Ok().json(json!({"status": "deactivated", "code": code}))
+            }
+        }
+        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to deactivate promo code: {}", e)),
+    }
+}
+
+async fn validate_promo(pool: web::Data<PgPool>, data: web::Json<ValidatePromoRequest>) -> HttpResponse {
+    let promo = sqlx::query_as!(
+        PromoCode,
+        r#"SELECT * FROM promo_codes WHERE code = $1"#,
+        data.code
+    )
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    let promo = match promo {
+        Ok(Some(p)) => p,
+        Ok(None) => return HttpResponse::Ok().json(json!({"valid": false, "reason": "Промокод не найден"})),
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    if !promo.is_active {
+        return HttpResponse::Ok().json(json!({"valid": false, "reason": "Промокод деактивирован"}));
+    }
+
+    if promo.current_uses >= promo.max_uses {
+        return HttpResponse::Ok().json(json!({"valid": false, "reason": "Промокод исчерпан"}));
+    }
+
+    if !promo.applicable_tariffs.contains(&data.tariff) {
+        return HttpResponse::Ok().json(json!({"valid": false, "reason": "Промокод не применим к этому тарифу"}));
+    }
+
+    let already_used = sqlx::query!(
+        r#"SELECT id FROM promo_usages WHERE promo_code_id = $1 AND telegram_id = $2"#,
+        promo.id,
+        data.telegram_id
+    )
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    match already_used {
+        Ok(Some(_)) => HttpResponse::Ok().json(json!({"valid": false, "reason": "Вы уже использовали этот промокод"})),
+        Ok(None) => HttpResponse::Ok().json(json!({"valid": true, "discount_percent": promo.discount_percent})),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
+async fn use_promo(pool: web::Data<PgPool>, data: web::Json<UsePromoRequest>) -> HttpResponse {
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    let promo = match sqlx::query!(
+        r#"SELECT id FROM promo_codes WHERE code = $1 AND is_active = true"#,
+        data.code
+    )
+    .fetch_optional(&mut *tx)
+    .await {
+        Ok(Some(p)) => p,
+        Ok(None) => return HttpResponse::NotFound().body("Promo code not found or inactive"),
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    if let Err(e) = sqlx::query!(
+        r#"INSERT INTO promo_usages (promo_code_id, telegram_id) VALUES ($1, $2)"#,
+        promo.id,
+        data.telegram_id
+    )
+    .execute(&mut *tx)
+    .await {
+        let _ = tx.rollback().await;
+        return HttpResponse::InternalServerError().body(format!("Failed to record promo usage: {}", e));
+    }
+
+    if let Err(e) = sqlx::query!(
+        r#"UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = $1"#,
+        promo.id
+    )
+    .execute(&mut *tx)
+    .await {
+        let _ = tx.rollback().await;
+        return HttpResponse::InternalServerError().body(format!("Failed to update promo usage count: {}", e));
+    }
+
+    if let Err(e) = tx.commit().await {
+        return HttpResponse::InternalServerError().body(e.to_string());
+    }
+
+    HttpResponse::Ok().json(json!({"status": "ok"}))
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     println!("Server starting...");
@@ -781,6 +925,10 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/{telegram_id}/refs").route(web::patch().to(payed_refs)))
             .service(web::resource("/users/{telegram_id}/disable_device").route(web::post().to(temp_disable_device_limit)))
             .service(web::resource("/users/{uuid}/get_devices").route(web::get().to(get_devices)))
+            .service(web::resource("/promos").route(web::post().to(create_promo)).route(web::get().to(list_promos)))
+            .service(web::resource("/promos/validate").route(web::post().to(validate_promo)))
+            .service(web::resource("/promos/use").route(web::post().to(use_promo)))
+            .service(web::resource("/promos/{code}/deactivate").route(web::patch().to(deactivate_promo)))
     })
     .bind("0.0.0.0:8080")?
     .run()
