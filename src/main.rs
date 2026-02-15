@@ -751,18 +751,13 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
 }
 
 async fn create_promo(pool: web::Data<PgPool>, data: web::Json<CreatePromoRequest>) -> HttpResponse {
-    let result = sqlx::query_as!(
-        PromoCode,
-        r#"
-        INSERT INTO promo_codes (code, discount_percent, applicable_tariffs, max_uses)
-        VALUES ($1, $2, $3, $4)
-        RETURNING *
-        "#,
-        data.code,
-        data.discount_percent,
-        &data.applicable_tariffs,
-        data.max_uses
+    let result = sqlx::query_as::<_, PromoCode>(
+        "INSERT INTO promo_codes (code, discount_percent, applicable_tariffs, max_uses) VALUES ($1, $2, $3, $4) RETURNING *"
     )
+    .bind(&data.code)
+    .bind(data.discount_percent)
+    .bind(&data.applicable_tariffs)
+    .bind(data.max_uses)
     .fetch_one(pool.get_ref())
     .await;
 
@@ -773,9 +768,8 @@ async fn create_promo(pool: web::Data<PgPool>, data: web::Json<CreatePromoReques
 }
 
 async fn list_promos(pool: web::Data<PgPool>) -> HttpResponse {
-    let result = sqlx::query_as!(
-        PromoCode,
-        r#"SELECT * FROM promo_codes ORDER BY created_at DESC"#
+    let result = sqlx::query_as::<_, PromoCode>(
+        "SELECT * FROM promo_codes ORDER BY created_at DESC"
     )
     .fetch_all(pool.get_ref())
     .await;
@@ -788,12 +782,10 @@ async fn list_promos(pool: web::Data<PgPool>) -> HttpResponse {
 
 async fn deactivate_promo(pool: web::Data<PgPool>, code: web::Path<String>) -> HttpResponse {
     let code = code.into_inner();
-    let result = sqlx::query!(
-        r#"UPDATE promo_codes SET is_active = false WHERE code = $1"#,
-        code
-    )
-    .execute(pool.get_ref())
-    .await;
+    let result = sqlx::query("UPDATE promo_codes SET is_active = false WHERE code = $1")
+        .bind(&code)
+        .execute(pool.get_ref())
+        .await;
 
     match result {
         Ok(res) => {
@@ -808,11 +800,10 @@ async fn deactivate_promo(pool: web::Data<PgPool>, code: web::Path<String>) -> H
 }
 
 async fn validate_promo(pool: web::Data<PgPool>, data: web::Json<ValidatePromoRequest>) -> HttpResponse {
-    let promo = sqlx::query_as!(
-        PromoCode,
-        r#"SELECT * FROM promo_codes WHERE code = $1"#,
-        data.code
+    let promo = sqlx::query_as::<_, PromoCode>(
+        "SELECT * FROM promo_codes WHERE code = $1"
     )
+    .bind(&data.code)
     .fetch_optional(pool.get_ref())
     .await;
 
@@ -834,18 +825,18 @@ async fn validate_promo(pool: web::Data<PgPool>, data: web::Json<ValidatePromoRe
         return HttpResponse::Ok().json(json!({"valid": false, "reason": "Промокод не применим к этому тарифу"}));
     }
 
-    let already_used = sqlx::query!(
-        r#"SELECT id FROM promo_usages WHERE promo_code_id = $1 AND telegram_id = $2"#,
-        promo.id,
-        data.telegram_id
+    let already_used: Option<(i32,)> = sqlx::query_as(
+        "SELECT id FROM promo_usages WHERE promo_code_id = $1 AND telegram_id = $2"
     )
+    .bind(promo.id)
+    .bind(data.telegram_id)
     .fetch_optional(pool.get_ref())
-    .await;
+    .await
+    .unwrap_or(None);
 
     match already_used {
-        Ok(Some(_)) => HttpResponse::Ok().json(json!({"valid": false, "reason": "Вы уже использовали этот промокод"})),
-        Ok(None) => HttpResponse::Ok().json(json!({"valid": true, "discount_percent": promo.discount_percent})),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Some(_) => HttpResponse::Ok().json(json!({"valid": false, "reason": "Вы уже использовали этот промокод"})),
+        None => HttpResponse::Ok().json(json!({"valid": true, "discount_percent": promo.discount_percent})),
     }
 }
 
@@ -855,32 +846,36 @@ async fn use_promo(pool: web::Data<PgPool>, data: web::Json<UsePromoRequest>) ->
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
-    let promo = match sqlx::query!(
-        r#"SELECT id FROM promo_codes WHERE code = $1 AND is_active = true"#,
-        data.code
+    let promo: Option<(i32,)> = match sqlx::query_as(
+        "SELECT id FROM promo_codes WHERE code = $1 AND is_active = true"
     )
+    .bind(&data.code)
     .fetch_optional(&mut *tx)
     .await {
-        Ok(Some(p)) => p,
-        Ok(None) => return HttpResponse::NotFound().body("Promo code not found or inactive"),
+        Ok(p) => p,
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
 
-    if let Err(e) = sqlx::query!(
-        r#"INSERT INTO promo_usages (promo_code_id, telegram_id) VALUES ($1, $2)"#,
-        promo.id,
-        data.telegram_id
+    let promo_id = match promo {
+        Some((id,)) => id,
+        None => return HttpResponse::NotFound().body("Promo code not found or inactive"),
+    };
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO promo_usages (promo_code_id, telegram_id) VALUES ($1, $2)"
     )
+    .bind(promo_id)
+    .bind(data.telegram_id)
     .execute(&mut *tx)
     .await {
         let _ = tx.rollback().await;
         return HttpResponse::InternalServerError().body(format!("Failed to record promo usage: {}", e));
     }
 
-    if let Err(e) = sqlx::query!(
-        r#"UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = $1"#,
-        promo.id
+    if let Err(e) = sqlx::query(
+        "UPDATE promo_codes SET current_uses = current_uses + 1 WHERE id = $1"
     )
+    .bind(promo_id)
     .execute(&mut *tx)
     .await {
         let _ = tx.rollback().await;
