@@ -1111,6 +1111,7 @@ async fn toggle_pro(
 ) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
     let enable = data.is_pro;
+    let pro_squad = "b6a4e86b-b769-4c86-a2d9-f31bbe645029";
 
     let user = match sqlx::query_as!(
         User,
@@ -1123,13 +1124,46 @@ async fn toggle_pro(
         Err(_) => return HttpResponse::NotFound().body("User not found"),
     };
 
-    // Собираем список сквадов на основе текущего плана и нового is_pro
-    let mut squad_list = vec!["514a5e22-c599-4f72-81a5-e646f0391db7".to_string()];
-    if user.plan.starts_with("bs") {
-        squad_list.push("9e60626e-32a8-4d91-a2f8-2aa3fecf7b23".to_string());
+    // Получаем текущие сквады пользователя из Remnawave
+    let get_response = match HTTP_CLIENT
+        .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
+        .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "127.0.0.1")
+        .header("X-Forwarded-Proto", "https")
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to get user from remnawave: {}", e)),
+    };
+
+    if !get_response.status().is_success() {
+        return HttpResponse::InternalServerError().body(format!("Remnawave API get error: {}", get_response.status()));
     }
+
+    let json_response = match get_response.json::<serde_json::Value>().await {
+        Ok(json) => json,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse response: {}", e)),
+    };
+
+    // Извлекаем текущие сквады
+    let mut current_squads: Vec<String> = json_response["response"][0]["activeInternalSquads"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s["uuid"].as_str().map(|v| v.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Добавляем или убираем только PRO сквад
     if enable {
-        squad_list.push("b6a4e86b-b769-4c86-a2d9-f31bbe645029".to_string());
+        if !current_squads.contains(&pro_squad.to_string()) {
+            current_squads.push(pro_squad.to_string());
+        }
+    } else {
+        current_squads.retain(|s| s != pro_squad);
     }
 
     // Обновляем сквады в Remnawave
@@ -1141,7 +1175,7 @@ async fn toggle_pro(
         .header("X-Forwarded-Proto", "https")
         .json(&json!({
             "uuid": user.uuid,
-            "activeInternalSquads": json!(squad_list),
+            "activeInternalSquads": json!(current_squads),
         }))
         .send()
         .await
