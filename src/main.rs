@@ -3,6 +3,7 @@ use serde_json::json;
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
+use log::{info, warn, error};
 mod models;
 use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest};
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ lazy_static::lazy_static! {
 }
 
 async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
-    // Сначала проверяем существование пользователя в нашей БД
+    info!("[create_user] telegram_id={}, username={:?}, referral={:?}", data.telegram_id, data.username, data.referral_id);
     let existing_user = sqlx::query!(
         "SELECT telegram_id FROM users WHERE telegram_id = $1",
         data.telegram_id
@@ -25,9 +26,11 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
 
     match existing_user {
         Ok(Some(_)) => {
+            warn!("[create_user] User {} already exists", data.telegram_id);
             return HttpResponse::Conflict().body("User with this telegram_id already exists");
         }
         Err(e) => {
+            error!("[create_user] DB error checking user {}: {}", data.telegram_id, e);
             return HttpResponse::InternalServerError().body(e.to_string());
         }
         _ => {}
@@ -61,16 +64,23 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         .await
     {
         Ok(resp) => resp,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+        Err(e) => {
+            error!("[create_user] Remnawave API call failed for {}: {}", data.telegram_id, e);
+            return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e));
+        }
     };
 
     if !api_response.status().is_success() {
+        error!("[create_user] Remnawave API error for {}: {}", data.telegram_id, api_response.status());
         return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
 
     let json_response = match api_response.json::<serde_json::Value>().await {
         Ok(json) => json,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
+        Err(e) => {
+            error!("[create_user] Failed to parse Remnawave response for {}: {}", data.telegram_id, e);
+            return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e));
+        }
     };
 
     let uuid = Uuid::parse_str(
@@ -131,9 +141,11 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     }
 
     if let Err(e) = tx.commit().await {
+        error!("[create_user] TX commit failed for {}: {}", data.telegram_id, e);
         return HttpResponse::InternalServerError().body(e.to_string());
     }
 
+    info!("[create_user] Successfully created user {} (uuid={})", user.telegram_id, user.uuid);
     HttpResponse::Ok().json(user)
 }
 
@@ -158,8 +170,8 @@ async fn extend_subscription(
     let telegram_id = telegram_id.into_inner();
     let days = request.days;
     let plan = request.plan.clone();
+    info!("[extend_subscription] telegram_id={}, days={}, plan={}", telegram_id, days, plan);
 
-    // Получаем uuid пользователя
     let user = match sqlx::query!(
         "SELECT * FROM users WHERE telegram_id = $1",
         telegram_id
@@ -168,7 +180,10 @@ async fn extend_subscription(
     .await
     {
         Ok(record) => record,
-        Err(_) => return HttpResponse::NotFound().body("User not found"),
+        Err(_) => {
+            warn!("[extend_subscription] User {} not found", telegram_id);
+            return HttpResponse::NotFound().body("User not found");
+        }
     };
 
     let uuid = user.uuid;
@@ -203,6 +218,7 @@ async fn extend_subscription(
         squad_list.push("b6a4e86b-b769-4c86-a2d9-f31bbe645029".to_string());
     }
     let squads = json!(squad_list);
+    info!("[extend_subscription] User {} squads={:?}, is_pro={}, tag={}", telegram_id, squad_list, is_pro, tag);
 
     let now_utc = Utc::now();
     let plan_changed = user.plan != plan && plan != "trial" && plan != "free";
@@ -238,14 +254,17 @@ async fn extend_subscription(
         .await
     {
         Ok(resp) => resp,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+        Err(e) => {
+            error!("[extend_subscription] Remnawave API call failed for {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e));
+        }
     };
 
     if !api_response.status().is_success() {
+        error!("[extend_subscription] Remnawave API error for {}: {}", telegram_id, api_response.status());
         return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
 
-    
     let result = if plan_changed {
         sqlx::query_as!(
             User,
@@ -285,6 +304,7 @@ async fn extend_subscription(
     };
     match result {
         Ok(user) => {
+            info!("[extend_subscription] Success for user {}: plan={}, sub_end={}", user.telegram_id, user.plan, user.subscription_end);
             HttpResponse::Ok().json(json!({
                 "telegram_id": user.telegram_id,
                 "uuid": uuid,
@@ -293,17 +313,19 @@ async fn extend_subscription(
                 "plan":user.plan
             }))
         },
-        Err(_e) => {
+        Err(e) => {
+            error!("[extend_subscription] DB update failed for {}: {}", telegram_id, e);
             return HttpResponse::InternalServerError().body("Failed to update database");
         }
     }
-    
+
 }
 
 
 async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>) -> HttpResponse {
     let referral_id = data.referral_id;
     let referred_telegram_id = data.referred_telegram_id;
+    info!("[add_referral] referrer={}, referred={}", referral_id, referred_telegram_id);
 
     // Проверяем, что пользователь еще не был приглашен кем-либо
     let existing_referral = match sqlx::query!(
@@ -401,6 +423,7 @@ async fn get_user_info(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> 
 async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::Json<bool>) -> HttpResponse {
     let is_used_trial = data.into_inner();
     let telegram_id = telegram_id.into_inner();
+    info!("[trial] telegram_id={}, is_used_trial={}", telegram_id, is_used_trial);
     let result = match sqlx::query!(
         r#"
         UPDATE users 
@@ -428,6 +451,7 @@ async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::J
 async fn ref_bonus(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::Json<bool>) -> HttpResponse {
     let is_used_trial = data.into_inner();
     let telegram_id = telegram_id.into_inner();
+    info!("[ref_bonus] telegram_id={}, status={}", telegram_id, is_used_trial);
     let result = match sqlx::query!(
         r#"
         UPDATE users 
@@ -455,6 +479,7 @@ async fn ref_bonus(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: we
 
 async fn check_connection(telegram_id: web::Path<i64>) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
+    info!("[check_connection] telegram_id={}", telegram_id);
 
     let api_response = match HTTP_CLIENT
     .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
@@ -496,8 +521,7 @@ async fn get_expiring_users(
         .get("days")
         .and_then(|d| d.parse::<i64>().ok())
         .unwrap_or(1);
-
-    // Рассчитываем дату, после которой подписка считается истекающей
+    info!("[get_expiring_users] days_before={}", days_before);
     let threshold_date = Utc::now() + chrono::Duration::days(days_before);
 
     let mut tx = match pool.begin().await {
@@ -532,6 +556,7 @@ async fn get_expiring_users(
     }
 
     let telegram_ids: Vec<i64> = users.iter().map(|u| u.telegram_id).collect();
+    info!("[get_expiring_users] Found {} expiring users: {:?}", users.len(), telegram_ids);
 
     match sqlx::query!(
         r#"
@@ -558,7 +583,7 @@ async fn get_expiring_users(
 }
 
 async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
-
+    info!("[get_expired_users] Checking for expired users");
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
@@ -618,6 +643,7 @@ async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
 async fn payed_refs(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::Json<i64>) -> HttpResponse {
     let is_used_trial = data.into_inner();
     let telegram_id = telegram_id.into_inner();
+    info!("[payed_refs] telegram_id={}, amount={}", telegram_id, is_used_trial);
     let result = match sqlx::query!(
         r#"
         UPDATE users 
@@ -647,6 +673,7 @@ async fn temp_disable_device_limit(
     telegram_id: web::Path<i64>,
 ) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
+    info!("[temp_disable_device_limit] telegram_id={}", telegram_id);
 
     let user = match sqlx::query_as!(
         User,
@@ -686,8 +713,10 @@ async fn temp_disable_device_limit(
         return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
 
+    info!("[temp_disable_device_limit] Disabled limit for user {}, original={}, restoring in 30min", telegram_id, original_limit);
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+        info!("[temp_disable_device_limit] Restoring device limit {} for uuid={}", original_limit, uuid);
         let _ = HTTP_CLIENT
             .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
             .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
@@ -711,6 +740,7 @@ async fn temp_disable_device_limit(
 
 async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
+    info!("[get_devices] telegram_id={}", telegram_id);
 
     let api_response = match HTTP_CLIENT
     .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
@@ -776,6 +806,7 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
 }
 
 async fn create_promo(pool: web::Data<PgPool>, data: web::Json<CreatePromoRequest>) -> HttpResponse {
+    info!("[create_promo] code={}, discount={}%, tariffs={:?}, max_uses={}", data.code, data.discount_percent, data.applicable_tariffs, data.max_uses);
     let result = sqlx::query_as::<_, PromoCode>(
         "INSERT INTO promo_codes (code, discount_percent, applicable_tariffs, max_uses) VALUES ($1, $2, $3, $4) RETURNING *"
     )
@@ -807,6 +838,7 @@ async fn list_promos(pool: web::Data<PgPool>) -> HttpResponse {
 
 async fn deactivate_promo(pool: web::Data<PgPool>, code: web::Path<String>) -> HttpResponse {
     let code = code.into_inner();
+    info!("[deactivate_promo] code={}", code);
     let result = sqlx::query("UPDATE promo_codes SET is_active = false WHERE code = $1")
         .bind(&code)
         .execute(pool.get_ref())
@@ -825,6 +857,7 @@ async fn deactivate_promo(pool: web::Data<PgPool>, code: web::Path<String>) -> H
 }
 
 async fn validate_promo(pool: web::Data<PgPool>, data: web::Json<ValidatePromoRequest>) -> HttpResponse {
+    info!("[validate_promo] code={}, tariff={}, telegram_id={}", data.code, data.tariff, data.telegram_id);
     let promo = sqlx::query_as::<_, PromoCode>(
         "SELECT * FROM promo_codes WHERE code = $1"
     )
@@ -866,6 +899,7 @@ async fn validate_promo(pool: web::Data<PgPool>, data: web::Json<ValidatePromoRe
 }
 
 async fn use_promo(pool: web::Data<PgPool>, data: web::Json<UsePromoRequest>) -> HttpResponse {
+    info!("[use_promo] code={}, telegram_id={}", data.code, data.telegram_id);
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
@@ -920,6 +954,7 @@ async fn save_payment_method(
     data: web::Json<SavePaymentMethodRequest>,
 ) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
+    info!("[save_payment_method] telegram_id={}, plan={}, duration={}", telegram_id, data.plan, data.duration);
     let result = sqlx::query(
         "UPDATE users SET payment_method_id = $1, auto_renew_plan = $2, auto_renew_duration = $3 WHERE telegram_id = $4"
     )
@@ -947,6 +982,7 @@ async fn delete_payment_method(
     telegram_id: web::Path<i64>,
 ) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
+    info!("[delete_payment_method] telegram_id={}", telegram_id);
     let result = sqlx::query(
         "UPDATE users SET payment_method_id = NULL, auto_renew = FALSE, auto_renew_plan = NULL, auto_renew_duration = NULL, auto_renew_fail_count = 0 WHERE telegram_id = $1"
     )
@@ -972,6 +1008,7 @@ async fn toggle_auto_renew(
     data: web::Json<ToggleAutoRenewRequest>,
 ) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
+    info!("[toggle_auto_renew] telegram_id={}, auto_renew={}, plan={:?}, duration={:?}", telegram_id, data.auto_renew, data.plan, data.duration);
 
     if data.auto_renew {
         // Check that payment_method_id exists
@@ -1068,6 +1105,7 @@ async fn record_auto_renew_attempt(
     data: web::Json<AutoRenewAttemptRequest>,
 ) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
+    info!("[record_auto_renew_attempt] telegram_id={}, success={}", telegram_id, data.success);
 
     if data.success {
         let result = sqlx::query(
@@ -1112,6 +1150,7 @@ async fn toggle_pro(
     let telegram_id = telegram_id.into_inner();
     let enable = data.is_pro;
     let pro_squad = "b6a4e86b-b769-4c86-a2d9-f31bbe645029";
+    info!("[toggle_pro] telegram_id={}, enable={}", telegram_id, enable);
 
     let user = match sqlx::query_as!(
         User,
@@ -1121,7 +1160,10 @@ async fn toggle_pro(
     .fetch_one(pool.get_ref())
     .await {
         Ok(user) => user,
-        Err(_) => return HttpResponse::NotFound().body("User not found"),
+        Err(_) => {
+            warn!("[toggle_pro] User {} not found", telegram_id);
+            return HttpResponse::NotFound().body("User not found");
+        }
     };
 
     // Получаем текущие сквады пользователя из Remnawave
@@ -1135,19 +1177,25 @@ async fn toggle_pro(
         .await
     {
         Ok(resp) => resp,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to get user from remnawave: {}", e)),
+        Err(e) => {
+            error!("[toggle_pro] Failed to get user {} from Remnawave: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().body(format!("Failed to get user from remnawave: {}", e));
+        }
     };
 
     if !get_response.status().is_success() {
+        error!("[toggle_pro] Remnawave GET error for {}: {}", telegram_id, get_response.status());
         return HttpResponse::InternalServerError().body(format!("Remnawave API get error: {}", get_response.status()));
     }
 
     let json_response = match get_response.json::<serde_json::Value>().await {
         Ok(json) => json,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse response: {}", e)),
+        Err(e) => {
+            error!("[toggle_pro] Failed to parse Remnawave response for {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().body(format!("Failed to parse response: {}", e));
+        }
     };
 
-    // Извлекаем текущие сквады
     let mut current_squads: Vec<String> = json_response["response"][0]["activeInternalSquads"]
         .as_array()
         .map(|arr| {
@@ -1165,6 +1213,7 @@ async fn toggle_pro(
     } else {
         current_squads.retain(|s| s != pro_squad);
     }
+    info!("[toggle_pro] User {} final squads: {:?}", telegram_id, current_squads);
 
     // Обновляем сквады в Remnawave
     let api_response = match HTTP_CLIENT
@@ -1181,10 +1230,14 @@ async fn toggle_pro(
         .await
     {
         Ok(resp) => resp,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+        Err(e) => {
+            error!("[toggle_pro] Remnawave PATCH failed for {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e));
+        }
     };
 
     if !api_response.status().is_success() {
+        error!("[toggle_pro] Remnawave PATCH error for {}: {}", telegram_id, api_response.status());
         return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
     }
 
@@ -1202,22 +1255,27 @@ async fn toggle_pro(
             if res.rows_affected() == 0 {
                 HttpResponse::NotFound().body("User not found")
             } else {
+                info!("[toggle_pro] Success for user {}: is_pro={}", telegram_id, enable);
                 HttpResponse::Ok().json(json!({"status": "ok", "is_pro": enable}))
             }
         }
-        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to update is_pro: {}", e)),
+        Err(e) => {
+            error!("[toggle_pro] DB update failed for {}: {}", telegram_id, e);
+            HttpResponse::InternalServerError().body(format!("Failed to update is_pro: {}", e))
+        }
     }
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    println!("Server starting...");
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    info!("Server starting...");
     dotenv::dotenv().ok();
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
-    println!("DB connected. Starting HTTP server...");
+    info!("DB connected. Starting HTTP server on 0.0.0.0:8080");
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
