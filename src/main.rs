@@ -821,7 +821,7 @@ async fn validate_promo(pool: web::Data<PgPool>, data: web::Json<ValidatePromoRe
         return HttpResponse::Ok().json(json!({"valid": false, "reason": "Промокод исчерпан"}));
     }
 
-    if !promo.applicable_tariffs.contains(&data.tariff) {
+    if !data.tariff.is_empty() && !promo.applicable_tariffs.contains(&data.tariff) {
         return HttpResponse::Ok().json(json!({"valid": false, "reason": "Промокод не применим к этому тарифу"}));
     }
 
@@ -836,7 +836,7 @@ async fn validate_promo(pool: web::Data<PgPool>, data: web::Json<ValidatePromoRe
 
     match already_used {
         Some(_) => HttpResponse::Ok().json(json!({"valid": false, "reason": "Вы уже использовали этот промокод"})),
-        None => HttpResponse::Ok().json(json!({"valid": true, "discount_percent": promo.discount_percent})),
+        None => HttpResponse::Ok().json(json!({"valid": true, "discount_percent": promo.discount_percent, "applicable_tariffs": promo.applicable_tariffs})),
     }
 }
 
