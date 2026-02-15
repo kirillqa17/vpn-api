@@ -4,7 +4,7 @@ use sqlx::postgres::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
 mod models;
-use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest};
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest};
 use std::collections::HashMap;
 use chrono::{Duration};
 
@@ -914,6 +914,196 @@ async fn use_promo(pool: web::Data<PgPool>, data: web::Json<UsePromoRequest>) ->
     HttpResponse::Ok().json(json!({"status": "ok"}))
 }
 
+async fn save_payment_method(
+    pool: web::Data<PgPool>,
+    telegram_id: web::Path<i64>,
+    data: web::Json<SavePaymentMethodRequest>,
+) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+    let result = sqlx::query(
+        "UPDATE users SET payment_method_id = $1, auto_renew_plan = $2, auto_renew_duration = $3 WHERE telegram_id = $4"
+    )
+    .bind(&data.payment_method_id)
+    .bind(&data.plan)
+    .bind(&data.duration)
+    .bind(telegram_id)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() == 0 {
+                HttpResponse::NotFound().body("User not found")
+            } else {
+                HttpResponse::Ok().json(json!({"status": "ok"}))
+            }
+        }
+        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to save payment method: {}", e)),
+    }
+}
+
+async fn delete_payment_method(
+    pool: web::Data<PgPool>,
+    telegram_id: web::Path<i64>,
+) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+    let result = sqlx::query(
+        "UPDATE users SET payment_method_id = NULL, auto_renew = FALSE, auto_renew_plan = NULL, auto_renew_duration = NULL, auto_renew_fail_count = 0 WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() == 0 {
+                HttpResponse::NotFound().body("User not found")
+            } else {
+                HttpResponse::Ok().json(json!({"status": "ok"}))
+            }
+        }
+        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to delete payment method: {}", e)),
+    }
+}
+
+async fn toggle_auto_renew(
+    pool: web::Data<PgPool>,
+    telegram_id: web::Path<i64>,
+    data: web::Json<ToggleAutoRenewRequest>,
+) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+
+    if data.auto_renew {
+        // Check that payment_method_id exists
+        let user: Option<(Option<String>,)> = match sqlx::query_as(
+            "SELECT payment_method_id FROM users WHERE telegram_id = $1"
+        )
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await {
+            Ok(u) => u,
+            Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        };
+
+        match user {
+            None => return HttpResponse::NotFound().body("User not found"),
+            Some((None,)) => return HttpResponse::BadRequest().body("No payment method saved. Pay with card first."),
+            _ => {}
+        }
+
+        let plan = match &data.plan {
+            Some(p) => p,
+            None => return HttpResponse::BadRequest().body("plan is required when enabling auto_renew"),
+        };
+        let duration = match &data.duration {
+            Some(d) => d,
+            None => return HttpResponse::BadRequest().body("duration is required when enabling auto_renew"),
+        };
+
+        let result = sqlx::query(
+            "UPDATE users SET auto_renew = TRUE, auto_renew_plan = $1, auto_renew_duration = $2, auto_renew_fail_count = 0 WHERE telegram_id = $3"
+        )
+        .bind(plan)
+        .bind(duration)
+        .bind(telegram_id)
+        .execute(pool.get_ref())
+        .await;
+
+        match result {
+            Ok(_) => HttpResponse::Ok().json(json!({"status": "ok", "auto_renew": true})),
+            Err(e) => HttpResponse::InternalServerError().body(format!("Failed to enable auto_renew: {}", e)),
+        }
+    } else {
+        let result = sqlx::query(
+            "UPDATE users SET auto_renew = FALSE WHERE telegram_id = $1"
+        )
+        .bind(telegram_id)
+        .execute(pool.get_ref())
+        .await;
+
+        match result {
+            Ok(_) => HttpResponse::Ok().json(json!({"status": "ok", "auto_renew": false})),
+            Err(e) => HttpResponse::InternalServerError().body(format!("Failed to disable auto_renew: {}", e)),
+        }
+    }
+}
+
+async fn get_auto_renew_users(
+    pool: web::Data<PgPool>,
+    query: web::Query<HashMap<String, String>>,
+) -> HttpResponse {
+    let days_before = query
+        .get("days")
+        .and_then(|d| d.parse::<i64>().ok())
+        .unwrap_or(1);
+
+    let threshold_date = Utc::now() + Duration::days(days_before);
+
+    let users = match sqlx::query_as::<_, AutoRenewUser>(
+        r#"
+        SELECT telegram_id, payment_method_id, auto_renew_plan, auto_renew_duration,
+               subscription_end, plan, username, auto_renew_fail_count
+        FROM users
+        WHERE auto_renew = TRUE
+          AND payment_method_id IS NOT NULL
+          AND is_active IN (1, 2)
+          AND subscription_end BETWEEN NOW() AND $1
+          AND (auto_renew_last_attempt IS NULL OR auto_renew_last_attempt < NOW() - INTERVAL '12 hours')
+        ORDER BY subscription_end ASC
+        "#
+    )
+    .bind(threshold_date)
+    .fetch_all(pool.get_ref())
+    .await {
+        Ok(users) => users,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to get auto_renew users: {}", e)),
+    };
+
+    HttpResponse::Ok().json(users)
+}
+
+async fn record_auto_renew_attempt(
+    pool: web::Data<PgPool>,
+    telegram_id: web::Path<i64>,
+    data: web::Json<AutoRenewAttemptRequest>,
+) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+
+    if data.success {
+        let result = sqlx::query(
+            "UPDATE users SET auto_renew_fail_count = 0, auto_renew_last_attempt = NOW() WHERE telegram_id = $1"
+        )
+        .bind(telegram_id)
+        .execute(pool.get_ref())
+        .await;
+
+        match result {
+            Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
+            Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        }
+    } else {
+        // Increment fail count and update last_attempt
+        let result = sqlx::query(
+            r#"
+            UPDATE users
+            SET auto_renew_fail_count = auto_renew_fail_count + 1,
+                auto_renew_last_attempt = NOW(),
+                auto_renew = CASE WHEN auto_renew_fail_count + 1 >= 3 THEN FALSE ELSE auto_renew END
+            WHERE telegram_id = $1
+            RETURNING auto_renew_fail_count, auto_renew
+            "#
+        )
+        .bind(telegram_id)
+        .execute(pool.get_ref())
+        .await;
+
+        match result {
+            Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
+            Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        }
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     println!("Server starting...");
@@ -936,15 +1126,23 @@ async fn main() -> std::io::Result<()> {
                     .route(web::patch().to(extend_subscription)),
             )
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
+            .service(web::resource("/users/expiring").route(web::get().to(get_expiring_users)))
+            .service(web::resource("/users/expired").route(web::get().to(get_expired_users)))
+            .service(web::resource("/users/auto_renew_due").route(web::get().to(get_auto_renew_users)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
             .service(web::resource("/users/{telegram_id}/is_connected").route(web::get().to(check_connection)))
             .service(web::resource("/users/{telegram_id}/ref_bonus").route(web::patch().to(ref_bonus)))
-            .service(web::resource("/users/expiring").route(web::get().to(get_expiring_users)))
-            .service(web::resource("/users/expired").route(web::get().to(get_expired_users)))
             .service(web::resource("/users/{telegram_id}/refs").route(web::patch().to(payed_refs)))
             .service(web::resource("/users/{telegram_id}/disable_device").route(web::post().to(temp_disable_device_limit)))
             .service(web::resource("/users/{uuid}/get_devices").route(web::get().to(get_devices)))
+            .service(web::resource("/users/{telegram_id}/payment_method")
+                .route(web::post().to(save_payment_method))
+                .route(web::delete().to(delete_payment_method)))
+            .service(web::resource("/users/{telegram_id}/auto_renew")
+                .route(web::patch().to(toggle_auto_renew)))
+            .service(web::resource("/users/{telegram_id}/auto_renew_attempt")
+                .route(web::post().to(record_auto_renew_attempt)))
             .service(web::resource("/promos").route(web::post().to(create_promo)).route(web::get().to(list_promos)))
             .service(web::resource("/promos/validate").route(web::post().to(validate_promo)))
             .service(web::resource("/promos/use").route(web::post().to(use_promo)))

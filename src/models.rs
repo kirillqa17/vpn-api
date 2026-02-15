@@ -24,6 +24,12 @@ pub struct User {
     pub sub_link: String,
     pub payed_refs: i64,
     pub device_limit: i64,
+    pub auto_renew: bool,
+    pub payment_method_id: Option<String>,
+    pub auto_renew_plan: Option<String>,
+    pub auto_renew_duration: Option<String>,
+    pub auto_renew_last_attempt: Option<DateTime<Utc>>,
+    pub auto_renew_fail_count: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -85,4 +91,35 @@ pub struct ValidatePromoRequest {
 pub struct UsePromoRequest {
     pub code: String,
     pub telegram_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SavePaymentMethodRequest {
+    pub payment_method_id: String,
+    pub plan: String,
+    pub duration: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ToggleAutoRenewRequest {
+    pub auto_renew: bool,
+    pub plan: Option<String>,
+    pub duration: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AutoRenewUser {
+    pub telegram_id: i64,
+    pub payment_method_id: Option<String>,
+    pub auto_renew_plan: Option<String>,
+    pub auto_renew_duration: Option<String>,
+    pub subscription_end: DateTime<Utc>,
+    pub plan: String,
+    pub username: Option<String>,
+    pub auto_renew_fail_count: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AutoRenewAttemptRequest {
+    pub success: bool,
 }
