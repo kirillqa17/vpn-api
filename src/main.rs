@@ -1305,8 +1305,8 @@ async fn get_user_squads(telegram_id: web::Path<i64>) -> HttpResponse {
             arr.iter()
                 .map(|s| {
                     let uuid = s["uuid"].as_str().unwrap_or("unknown").to_string();
-                    let tag = s["tag"].as_str().unwrap_or("unknown").to_string();
-                    json!({"uuid": uuid, "tag": tag})
+                    let name = s["name"].as_str().unwrap_or("unknown").to_string();
+                    json!({"uuid": uuid, "name": name})
                 })
                 .collect()
         })
