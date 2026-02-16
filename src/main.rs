@@ -1316,6 +1316,27 @@ async fn get_user_squads(telegram_id: web::Path<i64>) -> HttpResponse {
     HttpResponse::Ok().json(json!({"squads": squads}))
 }
 
+async fn get_active_users(pool: web::Data<PgPool>) -> HttpResponse {
+    info!("[get_active_users] Fetching active users");
+
+    let users = match sqlx::query_as!(
+        User,
+        "SELECT * FROM users WHERE is_active = 1"
+    )
+    .fetch_all(pool.get_ref())
+    .await
+    {
+        Ok(users) => users,
+        Err(e) => {
+            error!("[get_active_users] DB error: {}", e);
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+    };
+
+    info!("[get_active_users] Found {} active users", users.len());
+    HttpResponse::Ok().json(users)
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -1338,6 +1359,7 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/users/{telegram_id}/extend")
                     .route(web::patch().to(extend_subscription)),
             )
+            .service(web::resource("/users/active").route(web::get().to(get_active_users)))
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/expiring").route(web::get().to(get_expiring_users)))
             .service(web::resource("/users/expired").route(web::get().to(get_expired_users)))
