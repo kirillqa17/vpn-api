@@ -129,3 +129,12 @@ pub struct AutoRenewAttemptRequest {
 pub struct ToggleProRequest {
     pub is_pro: bool,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct CreateFailedReceiptRequest {
+    pub payment_id: String,
+    pub telegram_id: i64,
+    pub amount: f64,
+    pub description: String,
+    pub error_message: Option<String>,
+}

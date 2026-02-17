@@ -5,7 +5,8 @@ use uuid::Uuid;
 use chrono::Utc;
 use log::{info, warn, error};
 mod models;
-use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest};
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest, CreateFailedReceiptRequest};
+use sqlx::Row;
 use std::collections::HashMap;
 use chrono::{Duration};
 
@@ -209,16 +210,57 @@ async fn extend_subscription(
         _ => "UNKNOWN",
     };
 
-    let is_pro = user.is_pro;
-    let mut squad_list = vec!["514a5e22-c599-4f72-81a5-e646f0391db7".to_string()];
-    if plan.starts_with("bs") {
-        squad_list.push("9e60626e-32a8-4d91-a2f8-2aa3fecf7b23".to_string());
+    let default_squad = "514a5e22-c599-4f72-81a5-e646f0391db7";
+    let bs_squad = "9e60626e-32a8-4d91-a2f8-2aa3fecf7b23";
+    let pro_squad = "b6a4e86b-b769-4c86-a2d9-f31bbe645029";
+
+    // Fetch current squads from Remnawave (additive logic)
+    let get_response = match HTTP_CLIENT
+        .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
+        .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "127.0.0.1")
+        .header("X-Forwarded-Proto", "https")
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            error!("[extend_subscription] Failed to get user {} from Remnawave: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().body(format!("Failed to get user from remnawave: {}", e));
+        }
+    };
+
+    let mut squad_list: Vec<String> = if get_response.status().is_success() {
+        match get_response.json::<serde_json::Value>().await {
+            Ok(json) => json["response"][0]["activeInternalSquads"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s["uuid"].as_str().map(|v| v.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Err(_) => vec![],
+        }
+    } else {
+        vec![]
+    };
+
+    // Ensure default squad is always present
+    if !squad_list.contains(&default_squad.to_string()) {
+        squad_list.push(default_squad.to_string());
     }
-    if is_pro {
-        squad_list.push("b6a4e86b-b769-4c86-a2d9-f31bbe645029".to_string());
+    // Add BS squad if buying BS plan
+    if plan.starts_with("bs") && !squad_list.contains(&bs_squad.to_string()) {
+        squad_list.push(bs_squad.to_string());
+    }
+    // Keep PRO squad if user has pro enabled
+    if user.is_pro && !squad_list.contains(&pro_squad.to_string()) {
+        squad_list.push(pro_squad.to_string());
     }
     let squads = json!(squad_list);
-    info!("[extend_subscription] User {} squads={:?}, is_pro={}, tag={}", telegram_id, squad_list, is_pro, tag);
+    info!("[extend_subscription] User {} squads={:?}, is_pro={}, tag={}", telegram_id, squad_list, user.is_pro, tag);
 
     let now_utc = Utc::now();
     let plan_changed = user.plan != plan && plan != "trial" && plan != "free";
@@ -1337,6 +1379,109 @@ async fn get_active_users(pool: web::Data<PgPool>) -> HttpResponse {
     HttpResponse::Ok().json(users)
 }
 
+// --- Failed Receipts (ФНС retry) ---
+
+async fn list_failed_receipts(pool: web::Data<PgPool>) -> HttpResponse {
+    info!("[list_failed_receipts] Fetching failed receipts with retry_count < 5");
+    let rows = match sqlx::query(
+        "SELECT id, payment_id, telegram_id, amount::float8 as amount, description, error_message, retry_count, created_at FROM failed_receipts WHERE retry_count < 5 ORDER BY created_at ASC"
+    )
+    .fetch_all(pool.get_ref())
+    .await {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("[list_failed_receipts] DB error: {}", e);
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+    };
+
+    let receipts: Vec<serde_json::Value> = rows.iter().map(|row| {
+        json!({
+            "id": row.get::<i32, _>("id"),
+            "payment_id": row.get::<String, _>("payment_id"),
+            "telegram_id": row.get::<i64, _>("telegram_id"),
+            "amount": row.get::<f64, _>("amount"),
+            "description": row.get::<String, _>("description"),
+            "error_message": row.get::<Option<String>, _>("error_message"),
+            "retry_count": row.get::<i32, _>("retry_count"),
+            "created_at": row.get::<Option<chrono::NaiveDateTime>, _>("created_at"),
+        })
+    }).collect();
+
+    info!("[list_failed_receipts] Found {} failed receipts", receipts.len());
+    HttpResponse::Ok().json(receipts)
+}
+
+async fn create_failed_receipt(pool: web::Data<PgPool>, data: web::Json<CreateFailedReceiptRequest>) -> HttpResponse {
+    info!("[create_failed_receipt] payment_id={}, telegram_id={}, amount={}", data.payment_id, data.telegram_id, data.amount);
+    let result = sqlx::query(
+        "INSERT INTO failed_receipts (payment_id, telegram_id, amount, description, error_message) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (payment_id) DO NOTHING"
+    )
+    .bind(&data.payment_id)
+    .bind(data.telegram_id)
+    .bind(data.amount)
+    .bind(&data.description)
+    .bind(&data.error_message)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
+        Err(e) => {
+            error!("[create_failed_receipt] DB error: {}", e);
+            HttpResponse::InternalServerError().body(format!("Failed to save failed receipt: {}", e))
+        }
+    }
+}
+
+async fn delete_failed_receipt(pool: web::Data<PgPool>, payment_id: web::Path<String>) -> HttpResponse {
+    let payment_id = payment_id.into_inner();
+    info!("[delete_failed_receipt] payment_id={}", payment_id);
+    let result = sqlx::query("DELETE FROM failed_receipts WHERE payment_id = $1")
+        .bind(&payment_id)
+        .execute(pool.get_ref())
+        .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() == 0 {
+                HttpResponse::NotFound().body("Failed receipt not found")
+            } else {
+                HttpResponse::Ok().json(json!({"status": "deleted"}))
+            }
+        }
+        Err(e) => {
+            error!("[delete_failed_receipt] DB error: {}", e);
+            HttpResponse::InternalServerError().body(e.to_string())
+        }
+    }
+}
+
+async fn retry_failed_receipt(pool: web::Data<PgPool>, payment_id: web::Path<String>) -> HttpResponse {
+    let payment_id = payment_id.into_inner();
+    info!("[retry_failed_receipt] Incrementing retry_count for payment_id={}", payment_id);
+    let result = sqlx::query(
+        "UPDATE failed_receipts SET retry_count = retry_count + 1, last_retry_at = NOW() WHERE payment_id = $1"
+    )
+    .bind(&payment_id)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() == 0 {
+                HttpResponse::NotFound().body("Failed receipt not found")
+            } else {
+                HttpResponse::Ok().json(json!({"status": "ok"}))
+            }
+        }
+        Err(e) => {
+            error!("[retry_failed_receipt] DB error: {}", e);
+            HttpResponse::InternalServerError().body(e.to_string())
+        }
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -1386,6 +1531,13 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/promos/validate").route(web::post().to(validate_promo)))
             .service(web::resource("/promos/use").route(web::post().to(use_promo)))
             .service(web::resource("/promos/{code}/deactivate").route(web::patch().to(deactivate_promo)))
+            .service(web::resource("/failed_receipts")
+                .route(web::get().to(list_failed_receipts))
+                .route(web::post().to(create_failed_receipt)))
+            .service(web::resource("/failed_receipts/{payment_id}")
+                .route(web::delete().to(delete_failed_receipt)))
+            .service(web::resource("/failed_receipts/{payment_id}/retry")
+                .route(web::patch().to(retry_failed_receipt)))
     })
     .bind("0.0.0.0:8080")?
     .run()
