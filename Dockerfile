@@ -3,7 +3,7 @@ FROM rust:latest AS builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
-COPY src/main.rs src/models.rs ./src/
+COPY src/ ./src/
 ARG DATABASE_URL
 RUN cargo build --release
 
