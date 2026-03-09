@@ -31,6 +31,7 @@ pub struct User {
     pub auto_renew_last_attempt: Option<DateTime<Utc>>,
     pub auto_renew_fail_count: i32,
     pub is_pro: bool,
+    pub card_last4: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -99,6 +100,7 @@ pub struct SavePaymentMethodRequest {
     pub payment_method_id: String,
     pub plan: String,
     pub duration: String,
+    pub card_last4: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

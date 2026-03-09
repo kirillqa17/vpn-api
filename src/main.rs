@@ -998,14 +998,15 @@ async fn save_payment_method(
     data: web::Json<SavePaymentMethodRequest>,
 ) -> HttpResponse {
     let telegram_id = telegram_id.into_inner();
-    info!("[save_payment_method] telegram_id={}, plan={}, duration={}", telegram_id, data.plan, data.duration);
+    info!("[save_payment_method] telegram_id={}, plan={}, duration={}, card_last4={:?}", telegram_id, data.plan, data.duration, data.card_last4);
     let result = sqlx::query(
-        "UPDATE users SET payment_method_id = $1, auto_renew_plan = $2, auto_renew_duration = $3 WHERE telegram_id = $4"
+        "UPDATE users SET payment_method_id = $1, auto_renew_plan = $2, auto_renew_duration = $3, card_last4 = $5 WHERE telegram_id = $4"
     )
     .bind(&data.payment_method_id)
     .bind(&data.plan)
     .bind(&data.duration)
     .bind(telegram_id)
+    .bind(&data.card_last4)
     .execute(pool.get_ref())
     .await;
 
@@ -1028,7 +1029,7 @@ async fn delete_payment_method(
     let telegram_id = telegram_id.into_inner();
     info!("[delete_payment_method] telegram_id={}", telegram_id);
     let result = sqlx::query(
-        "UPDATE users SET payment_method_id = NULL, auto_renew = FALSE, auto_renew_plan = NULL, auto_renew_duration = NULL, auto_renew_fail_count = 0 WHERE telegram_id = $1"
+        "UPDATE users SET payment_method_id = NULL, auto_renew = FALSE, auto_renew_plan = NULL, auto_renew_duration = NULL, auto_renew_fail_count = 0, card_last4 = NULL WHERE telegram_id = $1"
     )
     .bind(telegram_id)
     .execute(pool.get_ref())

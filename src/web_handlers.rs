@@ -84,7 +84,7 @@ pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespon
     let user = sqlx::query(
         "SELECT telegram_id, uuid, subscription_end, is_active, created_at, referrals, referral_id, \
          is_used_trial, is_used_ref_bonus, username, plan, sub_link, payed_refs, device_limit, \
-         auto_renew, payment_method_id, auto_renew_plan, auto_renew_duration, is_pro \
+         auto_renew, payment_method_id, auto_renew_plan, auto_renew_duration, is_pro, card_last4 \
          FROM users WHERE telegram_id = $1"
     )
     .bind(telegram_id)
@@ -114,6 +114,7 @@ pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespon
                 "auto_renew_plan": row.get::<Option<String>, _>("auto_renew_plan").unwrap_or_default(),
                 "auto_renew_duration": row.get::<Option<String>, _>("auto_renew_duration").unwrap_or_default(),
                 "is_pro": row.get::<bool, _>("is_pro"),
+                "card_last4": row.get::<Option<String>, _>("card_last4").unwrap_or_default(),
             }))
         }
         Ok(None) => HttpResponse::NotFound().body("User not found"),
