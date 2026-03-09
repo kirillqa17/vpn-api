@@ -619,7 +619,7 @@ async fn convert_rub_to_crypto(rub: f64, currency: &str, cmc_key: &str) -> Optio
     let resp = HTTP_CLIENT
         .get("https://pro-api.coinmarketcap.com/v1/tools/price-conversion")
         .header("X-CMC_PRO_API_KEY", cmc_key)
-        .query(&[("amount", &format!("{}", usd_amount)), ("symbol", "USD"), ("convert", currency)])
+        .query(&[("amount", &format!("{}", usd_amount)), ("symbol", &"USD".to_string()), ("convert", &currency.to_string())])
         .send()
         .await
         .ok()?;
