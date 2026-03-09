@@ -5,6 +5,8 @@ use uuid::Uuid;
 use chrono::Utc;
 use log::{info, warn, error};
 mod models;
+mod jwt;
+mod web_handlers;
 use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest, CreateFailedReceiptRequest};
 use sqlx::Row;
 use std::collections::HashMap;
@@ -1538,6 +1540,39 @@ async fn main() -> std::io::Result<()> {
                 .route(web::delete().to(delete_failed_receipt)))
             .service(web::resource("/failed_receipts/{payment_id}/retry")
                 .route(web::patch().to(retry_failed_receipt)))
+            // Web app endpoints
+            .service(web::resource("/web/auth/telegram")
+                .route(web::post().to(web_handlers::auth_telegram)))
+            .service(web::resource("/web/auth/telegram-login")
+                .route(web::post().to(web_handlers::auth_telegram_login)))
+            .service(web::resource("/web/me")
+                .route(web::get().to(web_handlers::web_get_me)))
+            .service(web::resource("/web/me/devices")
+                .route(web::get().to(web_handlers::web_get_devices)))
+            .service(web::resource("/web/me/devices/{hwid}")
+                .route(web::delete().to(web_handlers::web_delete_device)))
+            .service(web::resource("/web/me/connection")
+                .route(web::get().to(web_handlers::web_check_connection)))
+            .service(web::resource("/web/subscription/prices")
+                .route(web::get().to(web_handlers::web_get_prices)))
+            .service(web::resource("/web/subscription/trial")
+                .route(web::post().to(web_handlers::web_activate_trial)))
+            .service(web::resource("/web/payment/create")
+                .route(web::post().to(web_handlers::web_create_payment)))
+            .service(web::resource("/web/payment/{payment_id}/status")
+                .route(web::get().to(web_handlers::web_payment_status)))
+            .service(web::resource("/web/payment/crypto/create")
+                .route(web::post().to(web_handlers::web_create_crypto_payment)))
+            .service(web::resource("/web/promo/validate")
+                .route(web::post().to(web_handlers::web_validate_promo)))
+            .service(web::resource("/web/settings/auto-renew")
+                .route(web::patch().to(web_handlers::web_toggle_auto_renew)))
+            .service(web::resource("/web/settings/pro")
+                .route(web::patch().to(web_handlers::web_toggle_pro)))
+            .service(web::resource("/web/settings/payment-method")
+                .route(web::delete().to(web_handlers::web_unbind_card)))
+            .service(web::resource("/web/referral/info")
+                .route(web::get().to(web_handlers::web_referral_info)))
     })
     .bind("0.0.0.0:8080")?
     .run()
