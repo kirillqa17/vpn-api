@@ -849,6 +849,76 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     HttpResponse::Ok().json(json!({ "devices_amount": devices_amount }))
 }
 
+async fn list_devices(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+    info!("[list_devices] telegram_id={}", telegram_id);
+
+    let uuid = match sqlx::query_scalar::<_, uuid::Uuid>("SELECT uuid FROM users WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(u)) => u.to_string(),
+        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Err(e) => return HttpResponse::InternalServerError().body(format!("DB error: {}", e)),
+    };
+
+    let resp = HTTP_CLIENT
+        .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, uuid))
+        .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "127.0.0.1")
+        .header("X-Forwarded-Proto", "https")
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            match r.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    let devices = json["response"]["devices"].clone();
+                    let total = json["response"]["total"].as_u64().unwrap_or(0);
+                    HttpResponse::Ok().json(json!({ "devices": devices, "total": total }))
+                }
+                Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+            }
+        }
+        Ok(r) => HttpResponse::InternalServerError().body(format!("Remnawave error: {}", r.status())),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
+async fn bot_delete_device(pool: web::Data<PgPool>, path: web::Path<(i64, String)>) -> HttpResponse {
+    let (telegram_id, hwid) = path.into_inner();
+    info!("[bot_delete_device] telegram_id={}, hwid={}", telegram_id, hwid);
+
+    let uuid = match sqlx::query_scalar::<_, uuid::Uuid>("SELECT uuid FROM users WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(u)) => u.to_string(),
+        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Err(e) => return HttpResponse::InternalServerError().body(format!("DB error: {}", e)),
+    };
+
+    let resp = HTTP_CLIENT
+        .post(&format!("{}/hwid/devices/delete", *REMNAWAVE_API_BASE))
+        .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", "127.0.0.1")
+        .header("X-Forwarded-Proto", "https")
+        .json(&json!({ "userUuid": uuid, "hwid": hwid }))
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => HttpResponse::Ok().json(json!({"status": "ok"})),
+        Ok(r) => HttpResponse::InternalServerError().body(format!("Remnawave error: {}", r.status())),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
 async fn create_promo(pool: web::Data<PgPool>, data: web::Json<CreatePromoRequest>) -> HttpResponse {
     info!("[create_promo] code={}, discount={}%, tariffs={:?}, max_uses={}", data.code, data.discount_percent, data.applicable_tariffs, data.max_uses);
     let result = sqlx::query_as::<_, PromoCode>(
@@ -1519,6 +1589,8 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/{telegram_id}/refs").route(web::patch().to(payed_refs)))
             .service(web::resource("/users/{telegram_id}/disable_device").route(web::post().to(temp_disable_device_limit)))
             .service(web::resource("/users/{uuid}/get_devices").route(web::get().to(get_devices)))
+            .service(web::resource("/users/{telegram_id}/devices").route(web::get().to(list_devices)))
+            .service(web::resource("/users/{telegram_id}/devices/{hwid}").route(web::delete().to(bot_delete_device)))
             .service(web::resource("/users/{telegram_id}/payment_method")
                 .route(web::post().to(save_payment_method))
                 .route(web::delete().to(delete_payment_method)))
