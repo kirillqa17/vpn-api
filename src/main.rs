@@ -1452,109 +1452,6 @@ async fn get_active_users(pool: web::Data<PgPool>) -> HttpResponse {
     HttpResponse::Ok().json(users)
 }
 
-// --- Failed Receipts (ФНС retry) ---
-
-async fn list_failed_receipts(pool: web::Data<PgPool>) -> HttpResponse {
-    info!("[list_failed_receipts] Fetching failed receipts with retry_count < 5");
-    let rows = match sqlx::query(
-        "SELECT id, payment_id, telegram_id, amount::float8 as amount, description, error_message, retry_count, created_at FROM failed_receipts WHERE retry_count < 5 ORDER BY created_at ASC"
-    )
-    .fetch_all(pool.get_ref())
-    .await {
-        Ok(rows) => rows,
-        Err(e) => {
-            error!("[list_failed_receipts] DB error: {}", e);
-            return HttpResponse::InternalServerError().body(e.to_string());
-        }
-    };
-
-    let receipts: Vec<serde_json::Value> = rows.iter().map(|row| {
-        json!({
-            "id": row.get::<i32, _>("id"),
-            "payment_id": row.get::<String, _>("payment_id"),
-            "telegram_id": row.get::<i64, _>("telegram_id"),
-            "amount": row.get::<f64, _>("amount"),
-            "description": row.get::<String, _>("description"),
-            "error_message": row.get::<Option<String>, _>("error_message"),
-            "retry_count": row.get::<i32, _>("retry_count"),
-            "created_at": row.get::<Option<chrono::NaiveDateTime>, _>("created_at"),
-        })
-    }).collect();
-
-    info!("[list_failed_receipts] Found {} failed receipts", receipts.len());
-    HttpResponse::Ok().json(receipts)
-}
-
-async fn create_failed_receipt(pool: web::Data<PgPool>, data: web::Json<CreateFailedReceiptRequest>) -> HttpResponse {
-    info!("[create_failed_receipt] payment_id={}, telegram_id={}, amount={}", data.payment_id, data.telegram_id, data.amount);
-    let result = sqlx::query(
-        "INSERT INTO failed_receipts (payment_id, telegram_id, amount, description, error_message) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (payment_id) DO NOTHING"
-    )
-    .bind(&data.payment_id)
-    .bind(data.telegram_id)
-    .bind(data.amount)
-    .bind(&data.description)
-    .bind(&data.error_message)
-    .execute(pool.get_ref())
-    .await;
-
-    match result {
-        Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
-        Err(e) => {
-            error!("[create_failed_receipt] DB error: {}", e);
-            HttpResponse::InternalServerError().body(format!("Failed to save failed receipt: {}", e))
-        }
-    }
-}
-
-async fn delete_failed_receipt(pool: web::Data<PgPool>, payment_id: web::Path<String>) -> HttpResponse {
-    let payment_id = payment_id.into_inner();
-    info!("[delete_failed_receipt] payment_id={}", payment_id);
-    let result = sqlx::query("DELETE FROM failed_receipts WHERE payment_id = $1")
-        .bind(&payment_id)
-        .execute(pool.get_ref())
-        .await;
-
-    match result {
-        Ok(res) => {
-            if res.rows_affected() == 0 {
-                HttpResponse::NotFound().body("Failed receipt not found")
-            } else {
-                HttpResponse::Ok().json(json!({"status": "deleted"}))
-            }
-        }
-        Err(e) => {
-            error!("[delete_failed_receipt] DB error: {}", e);
-            HttpResponse::InternalServerError().body(e.to_string())
-        }
-    }
-}
-
-async fn retry_failed_receipt(pool: web::Data<PgPool>, payment_id: web::Path<String>) -> HttpResponse {
-    let payment_id = payment_id.into_inner();
-    info!("[retry_failed_receipt] Incrementing retry_count for payment_id={}", payment_id);
-    let result = sqlx::query(
-        "UPDATE failed_receipts SET retry_count = retry_count + 1, last_retry_at = NOW() WHERE payment_id = $1"
-    )
-    .bind(&payment_id)
-    .execute(pool.get_ref())
-    .await;
-
-    match result {
-        Ok(res) => {
-            if res.rows_affected() == 0 {
-                HttpResponse::NotFound().body("Failed receipt not found")
-            } else {
-                HttpResponse::Ok().json(json!({"status": "ok"}))
-            }
-        }
-        Err(e) => {
-            error!("[retry_failed_receipt] DB error: {}", e);
-            HttpResponse::InternalServerError().body(e.to_string())
-        }
-    }
-}
-
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -1606,13 +1503,6 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/promos/validate").route(web::post().to(validate_promo)))
             .service(web::resource("/promos/use").route(web::post().to(use_promo)))
             .service(web::resource("/promos/{code}/deactivate").route(web::patch().to(deactivate_promo)))
-            .service(web::resource("/failed_receipts")
-                .route(web::get().to(list_failed_receipts))
-                .route(web::post().to(create_failed_receipt)))
-            .service(web::resource("/failed_receipts/{payment_id}")
-                .route(web::delete().to(delete_failed_receipt)))
-            .service(web::resource("/failed_receipts/{payment_id}/retry")
-                .route(web::patch().to(retry_failed_receipt)))
             // Web app endpoints
             .service(web::resource("/web/auth/telegram")
                 .route(web::post().to(web_handlers::auth_telegram)))
