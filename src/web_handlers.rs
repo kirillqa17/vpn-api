@@ -374,8 +374,8 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
     let tariff_name = match data.tariff.as_str() {
         "base" => "Базовый",
         "family" => "Семейный",
-        "bsbase" => "Базовый PRO",
-        "bsfamily" => "Семейный PRO",
+        "bsbase" => "Обход БС (Базовый)",
+        "bsfamily" => "Обход БС (Семейный)",
         _ => "Подписка",
     };
     let duration_name = match data.duration.as_str() {
@@ -391,6 +391,9 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
 
     let save_method = data.save_payment_method.unwrap_or(false);
 
+    let description = format!("SvoiVPN {} {}", tariff_name, duration_name);
+    let receipt_email = std::env::var("RECEIPT_EMAIL").unwrap_or_else(|_| "receipt@svoivpn.online".to_string());
+
     let payment_body = json!({
         "amount": {
             "value": format!("{}.00", price),
@@ -401,8 +404,24 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
             "return_url": format!("https://site.svoivpn.online/?payment_status=success")
         },
         "capture": true,
-        "description": format!("SvoiVPN {} {}", tariff_name, duration_name),
+        "description": description,
         "save_payment_method": save_method,
+        "receipt": {
+            "customer": {
+                "email": receipt_email
+            },
+            "items": [{
+                "description": description,
+                "quantity": "1.00",
+                "amount": {
+                    "value": format!("{}.00", price),
+                    "currency": "RUB"
+                },
+                "vat_code": 1,
+                "payment_subject": "service",
+                "payment_mode": "full_payment"
+            }]
+        },
         "metadata": {
             "telegram_id": telegram_id,
             "tariff": data.tariff,
