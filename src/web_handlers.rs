@@ -391,7 +391,25 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
 
     let save_method = data.save_payment_method.unwrap_or(false);
 
-    let description = format!("SvoiVPN {} {}", tariff_name, duration_name);
+    // Map duration code to Russian plan name (must match webhook's subscription_mapping)
+    let plan_name = match data.duration.as_str() {
+        "1m" => "1 месяц",
+        "3m" => "3 месяца",
+        "1y" => "1 год",
+        _ => "1 месяц",
+    };
+
+    // Get username for receipt
+    let username = sqlx::query_scalar::<_, Option<String>>("SELECT username FROM users WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+        .unwrap_or_else(|| format!("{}", telegram_id));
+
+    let description = format!("SvoiVPN {} {} (@{}, {})", tariff_name, duration_name, username, telegram_id);
     let receipt_email = std::env::var("RECEIPT_EMAIL").unwrap_or_else(|_| "receipt@svoivpn.online".to_string());
 
     let payment_body = json!({
@@ -423,8 +441,9 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
             }]
         },
         "metadata": {
-            "telegram_id": telegram_id,
+            "telegram_id": telegram_id.to_string(),
             "tariff": data.tariff,
+            "plan": plan_name,
             "duration": data.duration,
             "promo_code": data.promo_code.clone().unwrap_or_default(),
         }
