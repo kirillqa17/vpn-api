@@ -87,6 +87,16 @@ pub fn validate_init_data(init_data: &str) -> Option<i64> {
     user["id"].as_i64()
 }
 
+pub fn extract_username_from_init_data(init_data: &str) -> Option<String> {
+    let params: HashMap<String, String> = form_urlencoded::parse(init_data.as_bytes())
+        .into_owned()
+        .collect();
+
+    let user_str = params.get("user")?;
+    let user: serde_json::Value = serde_json::from_str(user_str).ok()?;
+    user["username"].as_str().map(|s| s.to_string())
+}
+
 pub fn validate_telegram_login(data: &HashMap<String, String>) -> Option<i64> {
     let hash = data.get("hash")?;
 

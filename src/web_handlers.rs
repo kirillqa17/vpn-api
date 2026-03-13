@@ -7,6 +7,8 @@ use log::{info, error};
 use std::collections::HashMap;
 
 use crate::jwt;
+use chrono::Utc;
+use uuid::Uuid;
 
 // === Auth endpoints ===
 
@@ -14,6 +16,68 @@ use crate::jwt;
 pub struct TelegramAuthRequest {
     #[serde(rename = "initData")]
     init_data: String,
+}
+
+/// Auto-register a new user (same logic as create_user in main.rs)
+async fn auto_register_user(pool: &PgPool, telegram_id: i64, username: Option<String>) -> Result<(), HttpResponse> {
+    let username = username.unwrap_or_else(|| format!("user_{}", telegram_id));
+    info!("[auto_register] Creating user {} ({})", telegram_id, username);
+
+    // Create in Remnawave
+    let api_response = HTTP_CLIENT
+        .post(&format!("{}/users", *REMNAWAVE_API_BASE))
+        .headers(remnawave_headers())
+        .json(&json!({
+            "username": username,
+            "status": "DISABLED",
+            "trafficLimitBytes": 0,
+            "trafficLimitStrategy": "MONTH",
+            "expireAt": Utc::now(),
+            "createdAt": Utc::now(),
+            "telegramId": telegram_id,
+            "hwidDeviceLimit": 2,
+            "activeInternalSquads": ["514a5e22-c599-4f72-81a5-e646f0391db7"],
+        }))
+        .send()
+        .await
+        .map_err(|e| {
+            error!("[auto_register] Remnawave API failed for {}: {}", telegram_id, e);
+            HttpResponse::InternalServerError().body(e.to_string())
+        })?;
+
+    if !api_response.status().is_success() {
+        error!("[auto_register] Remnawave error for {}: {}", telegram_id, api_response.status());
+        return Err(HttpResponse::InternalServerError().body("Remnawave API error"));
+    }
+
+    let json_response: serde_json::Value = api_response.json().await.map_err(|e| {
+        error!("[auto_register] Failed to parse Remnawave response: {}", e);
+        HttpResponse::InternalServerError().body(e.to_string())
+    })?;
+
+    let uuid_str = json_response["response"]["uuid"].as_str()
+        .ok_or_else(|| HttpResponse::InternalServerError().body("Missing uuid in Remnawave response"))?;
+    let uuid = Uuid::parse_str(uuid_str)
+        .map_err(|_| HttpResponse::InternalServerError().body("Invalid uuid"))?;
+    let sub_url = json_response["response"]["subscriptionUrl"].as_str().unwrap_or("").to_string();
+
+    sqlx::query(
+        "INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, is_used_trial, game_points, is_used_ref_bonus, game_attempts, username, sub_link, payed_refs, is_pro) \
+         VALUES ($1, $2, NOW(), 0, NOW(), false, 0, false, 0, $3, $4, 0, false)"
+    )
+    .bind(telegram_id)
+    .bind(uuid)
+    .bind(&username)
+    .bind(&sub_url)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        error!("[auto_register] DB insert failed for {}: {}", telegram_id, e);
+        HttpResponse::InternalServerError().body(e.to_string())
+    })?;
+
+    info!("[auto_register] Successfully created user {} (uuid={})", telegram_id, uuid);
+    Ok(())
 }
 
 pub async fn auth_telegram(
@@ -25,7 +89,7 @@ pub async fn auth_telegram(
         None => return HttpResponse::Unauthorized().body("Invalid initData"),
     };
 
-    // Verify user exists
+    // Check if user exists, auto-register if not
     let exists = sqlx::query("SELECT telegram_id FROM users WHERE telegram_id = $1")
         .bind(telegram_id)
         .fetch_optional(pool.get_ref())
@@ -33,7 +97,13 @@ pub async fn auth_telegram(
 
     match exists {
         Ok(Some(_)) => {}
-        Ok(None) => return HttpResponse::NotFound().body("User not registered"),
+        Ok(None) => {
+            // Extract username from initData
+            let username = jwt::extract_username_from_init_data(&data.init_data);
+            if let Err(resp) = auto_register_user(pool.get_ref(), telegram_id, username).await {
+                return resp;
+            }
+        }
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     }
 
@@ -61,7 +131,12 @@ pub async fn auth_telegram_login(
 
     match exists {
         Ok(Some(_)) => {}
-        Ok(None) => return HttpResponse::NotFound().body("User not registered"),
+        Ok(None) => {
+            let username = data.get("username").cloned();
+            if let Err(resp) = auto_register_user(pool.get_ref(), telegram_id, username).await {
+                return resp;
+            }
+        }
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     }
 
