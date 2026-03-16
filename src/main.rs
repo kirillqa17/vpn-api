@@ -1184,12 +1184,16 @@ async fn get_auto_renew_users(
     pool: web::Data<PgPool>,
     query: web::Query<HashMap<String, String>>,
 ) -> HttpResponse {
-    let days_before = query
-        .get("days")
-        .and_then(|d| d.parse::<i64>().ok())
-        .unwrap_or(1);
-
-    let threshold_date = Utc::now() + Duration::days(days_before);
+    // Support both "hours" and "days" params, hours takes priority
+    let threshold_date = if let Some(hours) = query.get("hours").and_then(|h| h.parse::<i64>().ok()) {
+        Utc::now() + Duration::hours(hours)
+    } else {
+        let days_before = query
+            .get("days")
+            .and_then(|d| d.parse::<i64>().ok())
+            .unwrap_or(1);
+        Utc::now() + Duration::days(days_before)
+    };
 
     let users = match sqlx::query_as::<_, AutoRenewUser>(
         r#"
@@ -1200,7 +1204,7 @@ async fn get_auto_renew_users(
           AND payment_method_id IS NOT NULL
           AND is_active IN (1, 2)
           AND subscription_end BETWEEN NOW() AND $1
-          AND (auto_renew_last_attempt IS NULL OR auto_renew_last_attempt < NOW() - INTERVAL '12 hours')
+          AND (auto_renew_last_attempt IS NULL OR auto_renew_last_attempt < NOW() - INTERVAL '50 minutes')
         ORDER BY subscription_end ASC
         "#
     )
