@@ -16,7 +16,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/vpn-api . 
+COPY --from=builder /app/target/release/vpn-api .
+COPY system_prompt.txt /app/system_prompt.txt
+ENV SYSTEM_PROMPT_PATH=/app/system_prompt.txt
 
 EXPOSE 8080
 
