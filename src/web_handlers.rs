@@ -394,6 +394,11 @@ pub async fn auth_merge_email_account(
         return HttpResponse::BadRequest().body("Cannot merge with the same account");
     }
 
+    // Only email accounts (negative ID) can be merged into other accounts
+    if email_user_id > 0 {
+        return HttpResponse::BadRequest().body("Can only merge email accounts (not Telegram accounts)");
+    }
+
     // Verify password
     use argon2::{Argon2, PasswordVerifier};
     use argon2::password_hash::PasswordHash;
@@ -549,6 +554,258 @@ pub async fn auth_merge_email_account(
 
     info!("[merge] Merged email account {} ({}) into Telegram account {}", email, email_user_id, tg_id);
     HttpResponse::Ok().json(json!({"status": "ok", "merged_from": email_user_id}))
+}
+
+// === Link code for Telegram binding ===
+
+pub async fn generate_link_code(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    // Only for email users
+    if telegram_id >= 0 {
+        return HttpResponse::BadRequest().body("Already a Telegram account");
+    }
+
+    // Generate random 8-char code
+    use rand::Rng;
+    let code: String = rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(8)
+        .map(char::from)
+        .collect();
+
+    // Clean old codes for this user + expired codes (>1 hour)
+    let _ = sqlx::query("DELETE FROM link_codes WHERE telegram_id = $1 OR created_at < NOW() - INTERVAL '1 hour'")
+        .bind(telegram_id)
+        .execute(pool.get_ref())
+        .await;
+
+    // Insert new code
+    let result = sqlx::query("INSERT INTO link_codes (code, telegram_id) VALUES ($1, $2)")
+        .bind(&code)
+        .bind(telegram_id)
+        .execute(pool.get_ref())
+        .await;
+
+    match result {
+        Ok(_) => {
+            info!("[link_code] Generated code {} for user {}", code, telegram_id);
+            HttpResponse::Ok().json(json!({
+                "code": code,
+                "deeplink": format!("https://t.me/svoivless_bot?start=link_{}", code),
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
+// Resolve link code (called by bot)
+pub async fn resolve_link_code(pool: web::Data<PgPool>, path: web::Path<String>) -> HttpResponse {
+    let code = path.into_inner();
+
+    let row = match sqlx::query("SELECT telegram_id, created_at FROM link_codes WHERE code = $1")
+        .bind(&code)
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::NotFound().body("Invalid or expired code"),
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    let email_user_id: i64 = row.get("telegram_id");
+    let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
+
+    // Check expiry (1 hour)
+    if Utc::now() - created_at > chrono::Duration::hours(1) {
+        let _ = sqlx::query("DELETE FROM link_codes WHERE code = $1").bind(&code).execute(pool.get_ref()).await;
+        return HttpResponse::Gone().body("Code expired");
+    }
+
+    // Return email user info
+    let user = sqlx::query(
+        "SELECT u.telegram_id, u.plan, u.subscription_end, u.is_active, u.is_used_trial, \
+         c.email FROM users u LEFT JOIN user_credentials c ON c.telegram_id = u.telegram_id \
+         WHERE u.telegram_id = $1"
+    )
+    .bind(email_user_id)
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    match user {
+        Ok(Some(row)) => {
+            HttpResponse::Ok().json(json!({
+                "email_user_id": email_user_id,
+                "email": row.get::<Option<String>, _>("email"),
+                "plan": row.get::<String, _>("plan"),
+                "is_active": row.get::<i32, _>("is_active"),
+                "is_used_trial": row.get::<bool, _>("is_used_trial"),
+            }))
+        }
+        Ok(None) => HttpResponse::NotFound().body("Email user not found"),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
+// Delete link code after successful merge (called by bot)
+pub async fn delete_link_code(pool: web::Data<PgPool>, path: web::Path<String>) -> HttpResponse {
+    let code = path.into_inner();
+    let _ = sqlx::query("DELETE FROM link_codes WHERE code = $1").bind(&code).execute(pool.get_ref()).await;
+    HttpResponse::Ok().json(json!({"status": "ok"}))
+}
+
+// === Internal merge by code (called by bot, no JWT) ===
+
+#[derive(Deserialize)]
+pub struct MergeByCodeRequest {
+    tg_id: i64,
+    code: String,
+}
+
+pub async fn internal_merge_by_code(pool: web::Data<PgPool>, data: web::Json<MergeByCodeRequest>) -> HttpResponse {
+    let tg_id = data.tg_id;
+    let code = &data.code;
+
+    // Resolve code
+    let code_row = match sqlx::query("SELECT telegram_id, created_at FROM link_codes WHERE code = $1")
+        .bind(code)
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::NotFound().body("Invalid or expired code"),
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    let email_user_id: i64 = code_row.get("telegram_id");
+    let created_at: chrono::DateTime<chrono::Utc> = code_row.get("created_at");
+
+    if Utc::now() - created_at > chrono::Duration::hours(1) {
+        let _ = sqlx::query("DELETE FROM link_codes WHERE code = $1").bind(code).execute(pool.get_ref()).await;
+        return HttpResponse::Gone().body("Code expired");
+    }
+
+    if email_user_id >= 0 {
+        return HttpResponse::BadRequest().body("Can only merge email accounts");
+    }
+
+    // Get email user data
+    let email_user = match sqlx::query(
+        "SELECT subscription_end, is_active, plan, device_limit, auto_renew, payment_method_id, \
+         auto_renew_plan, auto_renew_duration, is_pro, card_last4, payed_refs, is_used_trial \
+         FROM users WHERE telegram_id = $1"
+    )
+    .bind(email_user_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::NotFound().body("Email user not found"),
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    let email_plan: String = email_user.get("plan");
+    let email_is_used_trial: bool = email_user.get("is_used_trial");
+    let trial_extended = email_is_used_trial && email_plan == "trial";
+
+    // Merge data into TG account
+    let _ = sqlx::query(
+        "UPDATE users SET \
+         subscription_end = GREATEST(subscription_end, $1), \
+         is_active = GREATEST(is_active, $2), \
+         plan = CASE WHEN $2 > 0 THEN $3 ELSE plan END, \
+         device_limit = GREATEST(device_limit, $4), \
+         auto_renew = auto_renew OR $5, \
+         payment_method_id = COALESCE(payment_method_id, $6), \
+         auto_renew_plan = COALESCE(auto_renew_plan, $7), \
+         auto_renew_duration = COALESCE(auto_renew_duration, $8), \
+         is_pro = is_pro OR $9, \
+         card_last4 = COALESCE(card_last4, $10), \
+         payed_refs = payed_refs + $11, \
+         is_used_trial = is_used_trial OR $12 \
+         WHERE telegram_id = $13"
+    )
+    .bind(email_user.get::<chrono::DateTime<chrono::Utc>, _>("subscription_end"))
+    .bind(email_user.get::<i32, _>("is_active"))
+    .bind(&email_plan)
+    .bind(email_user.get::<i64, _>("device_limit"))
+    .bind(email_user.get::<bool, _>("auto_renew"))
+    .bind(email_user.get::<Option<String>, _>("payment_method_id"))
+    .bind(email_user.get::<Option<String>, _>("auto_renew_plan"))
+    .bind(email_user.get::<Option<String>, _>("auto_renew_duration"))
+    .bind(email_user.get::<bool, _>("is_pro"))
+    .bind(email_user.get::<Option<String>, _>("card_last4"))
+    .bind(email_user.get::<i64, _>("payed_refs"))
+    .bind(email_is_used_trial)
+    .bind(tg_id)
+    .execute(pool.get_ref())
+    .await;
+
+    // If trial, extend to 7 days
+    if trial_extended {
+        let new_expire = Utc::now() + chrono::Duration::days(7);
+        let _ = sqlx::query(
+            "UPDATE users SET subscription_end = $1, is_active = 1, plan = 'trial', is_used_trial = true WHERE telegram_id = $2"
+        )
+        .bind(new_expire)
+        .bind(tg_id)
+        .execute(pool.get_ref())
+        .await;
+
+        // Update Remnawave
+        let tg_uuid = sqlx::query_scalar::<_, uuid::Uuid>("SELECT uuid FROM users WHERE telegram_id = $1")
+            .bind(tg_id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .ok()
+            .flatten();
+
+        if let Some(uuid) = tg_uuid {
+            let _ = HTTP_CLIENT
+                .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
+                .headers(remnawave_headers())
+                .json(&json!({
+                    "uuid": uuid.to_string(),
+                    "status": "ACTIVE",
+                    "trafficLimitBytes": 26843545600_u64,
+                    "expireAt": new_expire.to_rfc3339(),
+                    "hwidDeviceLimit": 2,
+                }))
+                .send()
+                .await;
+        }
+    }
+
+    // Get email for response
+    let email: String = sqlx::query_scalar("SELECT email FROM user_credentials WHERE telegram_id = $1")
+        .bind(email_user_id)
+        .fetch_optional(pool.get_ref())
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    // Transfer credentials
+    let _ = sqlx::query("DELETE FROM user_credentials WHERE telegram_id = $1").bind(tg_id).execute(pool.get_ref()).await;
+    let _ = sqlx::query("UPDATE user_credentials SET telegram_id = $1 WHERE telegram_id = $2")
+        .bind(tg_id).bind(email_user_id).execute(pool.get_ref()).await;
+
+    // Update referrals
+    let _ = sqlx::query("UPDATE users SET referral_id = $1 WHERE referral_id = $2")
+        .bind(tg_id).bind(email_user_id).execute(pool.get_ref()).await;
+    let _ = sqlx::query("UPDATE users SET referrals = array_replace(referrals, $1, $2) WHERE $1 = ANY(referrals)")
+        .bind(email_user_id).bind(tg_id).execute(pool.get_ref()).await;
+
+    // Delete old email user
+    let _ = sqlx::query("DELETE FROM user_credentials WHERE telegram_id = $1").bind(email_user_id).execute(pool.get_ref()).await;
+    let _ = sqlx::query("DELETE FROM link_codes WHERE telegram_id = $1").bind(email_user_id).execute(pool.get_ref()).await;
+    let _ = sqlx::query("DELETE FROM users WHERE telegram_id = $1").bind(email_user_id).execute(pool.get_ref()).await;
+
+    info!("[merge_by_code] Merged email {} ({}) into TG {}", email, email_user_id, tg_id);
+    HttpResponse::Ok().json(json!({"status": "ok", "email": email, "trial_extended": trial_extended}))
 }
 
 // === User info ===
