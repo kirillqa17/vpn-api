@@ -19,9 +19,9 @@ pub struct TelegramAuthRequest {
 }
 
 /// Auto-register a new user (same logic as create_user in main.rs)
-async fn auto_register_user(pool: &PgPool, telegram_id: i64, username: Option<String>) -> Result<(), HttpResponse> {
+async fn auto_register_user(pool: &PgPool, telegram_id: i64, username: Option<String>, referral_id: Option<i64>) -> Result<(), HttpResponse> {
     let username = username.unwrap_or_else(|| format!("user_{}", telegram_id));
-    info!("[auto_register] Creating user {} ({})", telegram_id, username);
+    info!("[auto_register] Creating user {} ({}) referral={:?}", telegram_id, username, referral_id);
 
     // Create in Remnawave
     let api_response = HTTP_CLIENT
@@ -62,19 +62,30 @@ async fn auto_register_user(pool: &PgPool, telegram_id: i64, username: Option<St
     let sub_url = json_response["response"]["subscriptionUrl"].as_str().unwrap_or("").to_string();
 
     sqlx::query(
-        "INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, is_used_trial, game_points, is_used_ref_bonus, game_attempts, username, sub_link, payed_refs, is_pro) \
-         VALUES ($1, $2, NOW(), 0, NOW(), false, 0, false, 0, $3, $4, 0, false)"
+        "INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, is_used_trial, game_points, is_used_ref_bonus, game_attempts, username, sub_link, payed_refs, is_pro, referral_id) \
+         VALUES ($1, $2, NOW(), 0, NOW(), false, 0, false, 0, $3, $4, 0, false, $5)"
     )
     .bind(telegram_id)
     .bind(uuid)
     .bind(&username)
     .bind(&sub_url)
+    .bind(referral_id)
     .execute(pool)
     .await
     .map_err(|e| {
         error!("[auto_register] DB insert failed for {}: {}", telegram_id, e);
         HttpResponse::InternalServerError().body(e.to_string())
     })?;
+
+    // Add to referrer's referrals array
+    if let Some(ref_id) = referral_id {
+        let _ = sqlx::query("UPDATE users SET referrals = array_append(referrals, $1) WHERE telegram_id = $2")
+            .bind(telegram_id)
+            .bind(ref_id)
+            .execute(pool)
+            .await;
+        info!("[auto_register] Added {} to referrer {}'s referrals", telegram_id, ref_id);
+    }
 
     info!("[auto_register] Successfully created user {} (uuid={})", telegram_id, uuid);
     Ok(())
@@ -100,7 +111,7 @@ pub async fn auth_telegram(
         Ok(None) => {
             // Extract username from initData
             let username = jwt::extract_username_from_init_data(&data.init_data);
-            if let Err(resp) = auto_register_user(pool.get_ref(), telegram_id, username).await {
+            if let Err(resp) = auto_register_user(pool.get_ref(), telegram_id, username, None).await {
                 return resp;
             }
         }
@@ -133,7 +144,7 @@ pub async fn auth_telegram_login(
         Ok(Some(_)) => {}
         Ok(None) => {
             let username = data.get("username").cloned();
-            if let Err(resp) = auto_register_user(pool.get_ref(), telegram_id, username).await {
+            if let Err(resp) = auto_register_user(pool.get_ref(), telegram_id, username, None).await {
                 return resp;
             }
         }
@@ -154,6 +165,7 @@ pub async fn auth_telegram_login(
 pub struct EmailRegisterRequest {
     email: String,
     password: String,
+    referral_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -210,7 +222,7 @@ pub async fn auth_email_register(
 
     // Create user in Remnawave + DB (reuse auto_register_user)
     let username = email.split('@').next().unwrap_or("user").to_string();
-    if let Err(resp) = auto_register_user(pool.get_ref(), synthetic_id, Some(username)).await {
+    if let Err(resp) = auto_register_user(pool.get_ref(), synthetic_id, Some(username), data.referral_id).await {
         return resp;
     }
 
@@ -676,7 +688,14 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
     let yookassa_shop_id = std::env::var("YOOKASSA_SHOP_ID").unwrap_or_default();
     let yookassa_secret = std::env::var("YOOKASSA_SECRET_KEY").unwrap_or_default();
 
-    let save_method = data.save_payment_method.unwrap_or(false);
+    // Only save payment method if user has auto_renew enabled (otherwise SBP available)
+    let save_method = sqlx::query_scalar::<_, bool>("SELECT auto_renew FROM users WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
 
     // Map duration code to Russian plan name (must match webhook's subscription_mapping)
     let plan_name = match data.duration.as_str() {
@@ -1209,6 +1228,7 @@ pub async fn web_referral_info(pool: web::Data<PgPool>, req: HttpRequest) -> Htt
 
             HttpResponse::Ok().json(json!({
                 "invite_link": format!("https://t.me/svoivless_bot?start={}", telegram_id),
+                "web_invite_link": format!("https://site.svoivpn.online/?ref={}", telegram_id),
                 "referrals_count": refs_count,
                 "payed_refs": payed_refs,
                 "referrals": referral_list,
