@@ -1573,6 +1573,8 @@ async fn main() -> std::io::Result<()> {
             // Support endpoints
             .service(web::resource("/web/support/chat")
                 .route(web::post().to(web_handlers::web_support_chat)))
+            .service(web::resource("/web/support/escalate")
+                .route(web::post().to(web_handlers::web_support_escalate)))
     })
     .bind("0.0.0.0:8080")?
     .run()

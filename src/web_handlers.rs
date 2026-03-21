@@ -1836,3 +1836,133 @@ pub async fn web_support_chat(
 
     HttpResponse::Ok().json(json!({"response": ai_response}))
 }
+
+pub async fn web_support_escalate(
+    pool: web::Data<PgPool>,
+    req: HttpRequest,
+) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    // 1. Fetch user info for ticket
+    let user_row = sqlx::query(
+        "SELECT telegram_id, username, plan, subscription_end, is_active, device_limit, is_pro FROM users WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    let user_row = match user_row {
+        Ok(Some(row)) => row,
+        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Err(e) => {
+            error!("[support_escalate] DB error fetching user {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+    };
+
+    let username: String = user_row.try_get::<String, _>("username")
+        .unwrap_or_else(|_| "не указан".to_string());
+    let plan: String = user_row.try_get::<String, _>("plan")
+        .unwrap_or_else(|_| "не указан".to_string());
+    let subscription_end: String = user_row.try_get::<chrono::DateTime<chrono::Utc>, _>("subscription_end")
+        .map(|dt| dt.format("%d.%m.%Y %H:%M").to_string())
+        .unwrap_or_else(|_| "не указана".to_string());
+    let is_active: bool = user_row.try_get::<i32, _>("is_active")
+        .map(|v| v != 0)
+        .unwrap_or(false);
+    let device_limit: i64 = user_row.try_get::<i64, _>("device_limit")
+        .unwrap_or(0);
+    let is_pro: bool = user_row.try_get::<bool, _>("is_pro")
+        .unwrap_or(false);
+
+    // 2. Fetch recent chat history (last 10 messages for ticket context)
+    let history = sqlx::query(
+        "SELECT role, content, created_at FROM support_chats WHERE telegram_id = $1 ORDER BY created_at DESC LIMIT 10"
+    )
+    .bind(telegram_id)
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_default();
+
+    // 3. Format ticket text in HTML (Telegram parse_mode)
+    let history_text = if history.is_empty() {
+        "История чата пуста.".to_string()
+    } else {
+        history.iter().rev().map(|row| {
+            let role = row.get::<String, _>("role");
+            let content = row.get::<String, _>("content");
+            let truncated = if content.chars().count() > 200 {
+                let end: String = content.chars().take(200).collect();
+                format!("{}...", end)
+            } else {
+                content
+            };
+            format!("[{}]: {}", role, truncated)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+    };
+
+    let mut ticket_text = format!(
+        "<b>Запрос на поддержку</b>\n\n\
+         <b>Пользователь:</b>\n\
+         Telegram ID: <code>{}</code>\n\
+         Username: {}\n\
+         Тариф: {}\n\
+         Подписка до: {}\n\
+         Активен: {}\n\
+         Устройств: {}\n\
+         PRO: {}\n\n\
+         <b>История чата (последние сообщения):</b>\n{}",
+        telegram_id,
+        username,
+        plan,
+        subscription_end,
+        if is_active { "Да" } else { "Нет" },
+        device_limit,
+        if is_pro { "Да" } else { "Нет" },
+        history_text,
+    );
+
+    // Truncate to 4000 chars max (Telegram limit is 4096)
+    if ticket_text.len() > 4000 {
+        // Find a valid UTF-8 boundary at or before 4000 bytes
+        let mut end = 4000;
+        while !ticket_text.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        ticket_text.truncate(end);
+        ticket_text.push_str("...");
+    }
+
+    // 4. Send to each admin via Telegram Bot API
+    let tg_url = format!("https://api.telegram.org/bot{}/sendMessage", *SUPPORT_BOT_TOKEN);
+
+    for admin_id in ADMIN_IDS.iter() {
+        let result = HTTP_CLIENT.post(&tg_url)
+            .json(&json!({
+                "chat_id": admin_id,
+                "text": ticket_text,
+                "parse_mode": "HTML"
+            }))
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                info!("[support_escalate] Sent ticket to admin {}", admin_id);
+            }
+            Ok(resp) => {
+                error!("[support_escalate] Failed to notify admin {}: HTTP {}", admin_id, resp.status());
+            }
+            Err(e) => {
+                error!("[support_escalate] Failed to notify admin {}: {}", admin_id, e);
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(json!({"status": "escalated"}))
+}
