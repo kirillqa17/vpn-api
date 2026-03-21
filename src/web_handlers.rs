@@ -511,6 +511,42 @@ pub async fn auth_merge_email_account(
         .execute(pool.get_ref())
         .await;
 
+    // If the merged email account had a 1-hour trial, extend to full 7 days
+    if email_is_used_trial && email_plan == "trial" {
+        let new_expire = Utc::now() + chrono::Duration::days(7);
+        let _ = sqlx::query(
+            "UPDATE users SET subscription_end = $1, is_active = 1, plan = 'trial' WHERE telegram_id = $2"
+        )
+        .bind(new_expire)
+        .bind(tg_id)
+        .execute(pool.get_ref())
+        .await;
+
+        // Update Remnawave expiry
+        let tg_uuid = sqlx::query_scalar::<_, uuid::Uuid>("SELECT uuid FROM users WHERE telegram_id = $1")
+            .bind(tg_id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .ok()
+            .flatten();
+
+        if let Some(uuid) = tg_uuid {
+            let _ = HTTP_CLIENT
+                .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
+                .headers(remnawave_headers())
+                .json(&json!({
+                    "uuid": uuid.to_string(),
+                    "status": "ACTIVE",
+                    "expireAt": new_expire.to_rfc3339(),
+                    "hwidDeviceLimit": 2,
+                }))
+                .send()
+                .await;
+        }
+
+        info!("[merge] Extended trial to 7 days for user {}", tg_id);
+    }
+
     info!("[merge] Merged email account {} ({}) into Telegram account {}", email, email_user_id, tg_id);
     HttpResponse::Ok().json(json!({"status": "ok", "merged_from": email_user_id}))
 }
@@ -747,12 +783,19 @@ pub async fn web_activate_trial(pool: web::Data<PgPool>, req: HttpRequest) -> Ht
         return HttpResponse::BadRequest().body("Trial already used");
     }
 
-    // Mark trial as used and extend by 7 days
-    let result = sqlx::query(
+    // Email users (negative id) get 1 hour, Telegram users get 7 days
+    let is_email_user = telegram_id < 0;
+    let (interval_sql, duration) = if is_email_user {
+        ("INTERVAL '1 hour'", chrono::Duration::hours(1))
+    } else {
+        ("INTERVAL '7 days'", chrono::Duration::days(7))
+    };
+
+    let result = sqlx::query(&format!(
         "UPDATE users SET is_used_trial = true, is_active = 1, plan = 'trial', \
-         subscription_end = GREATEST(subscription_end, NOW()) + INTERVAL '7 days' \
-         WHERE telegram_id = $1"
-    )
+         subscription_end = GREATEST(subscription_end, NOW()) + {} \
+         WHERE telegram_id = $1", interval_sql
+    ))
     .bind(telegram_id)
     .execute(pool.get_ref())
     .await;
@@ -763,7 +806,7 @@ pub async fn web_activate_trial(pool: web::Data<PgPool>, req: HttpRequest) -> Ht
 
     // Update Remnawave
     let uuid = row.get::<uuid::Uuid, _>("uuid");
-    let new_expire = chrono::Utc::now() + chrono::Duration::days(7);
+    let new_expire = chrono::Utc::now() + duration;
 
     let _ = HTTP_CLIENT
         .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
@@ -780,7 +823,7 @@ pub async fn web_activate_trial(pool: web::Data<PgPool>, req: HttpRequest) -> Ht
         .send()
         .await;
 
-    HttpResponse::Ok().json(json!({"status": "ok"}))
+    HttpResponse::Ok().json(json!({"status": "ok", "is_email_trial": is_email_user}))
 }
 
 // === Payment creation ===
