@@ -1570,6 +1570,9 @@ async fn main() -> std::io::Result<()> {
                 .route(web::delete().to(web_handlers::web_unbind_card)))
             .service(web::resource("/web/referral/info")
                 .route(web::get().to(web_handlers::web_referral_info)))
+            // Support endpoints
+            .service(web::resource("/web/support/chat")
+                .route(web::post().to(web_handlers::web_support_chat)))
     })
     .bind("0.0.0.0:8080")?
     .run()
