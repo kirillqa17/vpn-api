@@ -361,6 +361,152 @@ pub async fn auth_link_email(
     }
 }
 
+/// Merge an email account into the current Telegram account.
+/// Transfers subscription, payment method, PRO status, etc. from email account to Telegram account.
+pub async fn auth_merge_email_account(
+    pool: web::Data<PgPool>,
+    req: HttpRequest,
+    data: web::Json<EmailLoginRequest>,
+) -> HttpResponse {
+    let tg_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    let email = data.email.trim().to_lowercase();
+
+    // Find email account credentials
+    let cred_row = match sqlx::query("SELECT telegram_id, password_hash FROM user_credentials WHERE email = $1")
+        .bind(&email)
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::NotFound().body("Email account not found"),
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    let email_user_id: i64 = cred_row.get("telegram_id");
+    let stored_hash: String = cred_row.get("password_hash");
+
+    // Can't merge with yourself
+    if email_user_id == tg_id {
+        return HttpResponse::BadRequest().body("Cannot merge with the same account");
+    }
+
+    // Verify password
+    use argon2::{Argon2, PasswordVerifier};
+    use argon2::password_hash::PasswordHash;
+
+    let parsed_hash = match PasswordHash::new(&stored_hash) {
+        Ok(h) => h,
+        Err(_) => return HttpResponse::InternalServerError().body("Invalid stored hash"),
+    };
+
+    if Argon2::default().verify_password(data.password.as_bytes(), &parsed_hash).is_err() {
+        return HttpResponse::Unauthorized().body("Invalid password");
+    }
+
+    // Get email account data
+    let email_user = match sqlx::query(
+        "SELECT subscription_end, is_active, plan, device_limit, auto_renew, payment_method_id, \
+         auto_renew_plan, auto_renew_duration, is_pro, card_last4, payed_refs, is_used_trial \
+         FROM users WHERE telegram_id = $1"
+    )
+    .bind(email_user_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::NotFound().body("Email user account not found in users table"),
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    // Merge: take the best of both accounts
+    let email_sub_end: chrono::DateTime<chrono::Utc> = email_user.get("subscription_end");
+    let email_is_active: i32 = email_user.get("is_active");
+    let email_plan: String = email_user.get("plan");
+    let email_device_limit: i64 = email_user.get("device_limit");
+    let email_auto_renew: bool = email_user.get("auto_renew");
+    let email_payment_method: Option<String> = email_user.get("payment_method_id");
+    let email_ar_plan: Option<String> = email_user.get("auto_renew_plan");
+    let email_ar_duration: Option<String> = email_user.get("auto_renew_duration");
+    let email_is_pro: bool = email_user.get("is_pro");
+    let email_card_last4: Option<String> = email_user.get("card_last4");
+    let email_payed_refs: i64 = email_user.get("payed_refs");
+    let email_is_used_trial: bool = email_user.get("is_used_trial");
+
+    // Update Telegram account with email account's data (take better values)
+    let result = sqlx::query(
+        "UPDATE users SET \
+         subscription_end = GREATEST(subscription_end, $1), \
+         is_active = GREATEST(is_active, $2), \
+         plan = CASE WHEN $2 > 0 THEN $3 ELSE plan END, \
+         device_limit = GREATEST(device_limit, $4), \
+         auto_renew = auto_renew OR $5, \
+         payment_method_id = COALESCE(payment_method_id, $6), \
+         auto_renew_plan = COALESCE(auto_renew_plan, $7), \
+         auto_renew_duration = COALESCE(auto_renew_duration, $8), \
+         is_pro = is_pro OR $9, \
+         card_last4 = COALESCE(card_last4, $10), \
+         payed_refs = payed_refs + $11, \
+         is_used_trial = is_used_trial OR $12 \
+         WHERE telegram_id = $13"
+    )
+    .bind(email_sub_end)
+    .bind(email_is_active)
+    .bind(&email_plan)
+    .bind(email_device_limit)
+    .bind(email_auto_renew)
+    .bind(&email_payment_method)
+    .bind(&email_ar_plan)
+    .bind(&email_ar_duration)
+    .bind(email_is_pro)
+    .bind(&email_card_last4)
+    .bind(email_payed_refs)
+    .bind(email_is_used_trial)
+    .bind(tg_id)
+    .execute(pool.get_ref())
+    .await;
+
+    if let Err(e) = result {
+        error!("[merge] Failed to update target user {}: {}", tg_id, e);
+        return HttpResponse::InternalServerError().body(e.to_string());
+    }
+
+    // Move credentials to new telegram_id
+    let _ = sqlx::query("UPDATE user_credentials SET telegram_id = $1 WHERE telegram_id = $2")
+        .bind(tg_id)
+        .bind(email_user_id)
+        .execute(pool.get_ref())
+        .await;
+
+    // Update referrals: anyone referred by email account now belongs to tg account
+    let _ = sqlx::query("UPDATE users SET referral_id = $1 WHERE referral_id = $2")
+        .bind(tg_id)
+        .bind(email_user_id)
+        .execute(pool.get_ref())
+        .await;
+
+    // Move referrals array entries from other users
+    let _ = sqlx::query(
+        "UPDATE users SET referrals = array_replace(referrals, $1, $2) WHERE $1 = ANY(referrals)"
+    )
+    .bind(email_user_id)
+    .bind(tg_id)
+    .execute(pool.get_ref())
+    .await;
+
+    // Delete old email user account
+    let _ = sqlx::query("DELETE FROM users WHERE telegram_id = $1")
+        .bind(email_user_id)
+        .execute(pool.get_ref())
+        .await;
+
+    info!("[merge] Merged email account {} ({}) into Telegram account {}", email, email_user_id, tg_id);
+    HttpResponse::Ok().json(json!({"status": "ok", "merged_from": email_user_id}))
+}
+
 // === User info ===
 
 pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {

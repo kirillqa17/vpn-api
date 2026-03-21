@@ -1518,6 +1518,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::auth_email_login)))
             .service(web::resource("/web/auth/link-email")
                 .route(web::post().to(web_handlers::auth_link_email)))
+            .service(web::resource("/web/auth/merge-email")
+                .route(web::post().to(web_handlers::auth_merge_email_account)))
             .service(web::resource("/web/me")
                 .route(web::get().to(web_handlers::web_get_me)))
             .service(web::resource("/web/me/devices")
