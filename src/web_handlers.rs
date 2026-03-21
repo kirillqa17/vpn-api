@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::jwt;
+use crate::models::SupportChatRequest;
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -1703,4 +1704,135 @@ pub async fn web_referral_info(pool: web::Data<PgPool>, req: HttpRequest) -> Htt
         Ok(None) => HttpResponse::NotFound().body("User not found"),
         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
+}
+
+// === AI Support endpoints ===
+
+pub async fn web_support_chat(
+    pool: web::Data<PgPool>,
+    req: HttpRequest,
+    body: web::Json<SupportChatRequest>,
+    system_prompt: web::Data<Arc<String>>,
+) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    // Input validation
+    let user_message = body.message.trim();
+    if user_message.is_empty() {
+        return HttpResponse::BadRequest().body("Message cannot be empty");
+    }
+
+    // 1. Fetch user context from DB
+    let user_row = sqlx::query(
+        "SELECT plan, subscription_end, is_active, device_limit, is_pro FROM users WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    let user_context = match user_row {
+        Ok(Some(row)) => format!(
+            "Контекст пользователя: тариф={}, подписка_до={}, активен={}, лимит_устройств={}, PRO={}",
+            row.get::<String, _>("plan"),
+            row.get::<chrono::DateTime<chrono::Utc>, _>("subscription_end").to_rfc3339(),
+            row.get::<i32, _>("is_active"),
+            row.get::<i64, _>("device_limit"),
+            row.get::<bool, _>("is_pro"),
+        ),
+        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Err(e) => {
+            error!("[support_chat] DB error fetching user {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+    };
+
+    // 2. Fetch last 40 messages from support_chats
+    let history = sqlx::query(
+        "SELECT role, content FROM support_chats WHERE telegram_id = $1 ORDER BY created_at DESC LIMIT 40"
+    )
+    .bind(telegram_id)
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_default();
+
+    // 3. Build messages array for ProxyAPI
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    messages.push(json!({"role": "system", "content": system_prompt.as_str()}));
+    messages.push(json!({"role": "system", "content": user_context}));
+
+    // First message: disclose AI identity
+    if history.is_empty() {
+        messages.push(json!({
+            "role": "assistant",
+            "content": "Здравствуйте! Я — ИИ-ассистент службы поддержки SvoiVPN. Чем могу Вам помочь?"
+        }));
+    } else {
+        // Add history in chronological order (reverse the DESC result)
+        let hist_messages: Vec<serde_json::Value> = history.iter().rev().map(|row| {
+            json!({
+                "role": row.get::<String, _>("role"),
+                "content": row.get::<String, _>("content")
+            })
+        }).collect();
+        messages.extend(hist_messages);
+    }
+
+    messages.push(json!({"role": "user", "content": user_message}));
+
+    // 4. Call ProxyAPI
+    let api_result = HTTP_CLIENT
+        .post(format!("{}/chat/completions", *PROXYAPI_BASE_URL))
+        .header("Authorization", format!("Bearer {}", *PROXYAPI_KEY))
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "model": "gemini/gemini-2.0-flash",
+            "temperature": 0.3,
+            "max_tokens": 1024,
+            "messages": messages
+        }))
+        .send()
+        .await;
+
+    let ai_response = match api_result {
+        Err(e) => {
+            error!("[support_chat] ProxyAPI call failed: {}", e);
+            return HttpResponse::ServiceUnavailable().body("service temporarily unavailable");
+        }
+        Ok(resp) if !resp.status().is_success() => {
+            error!("[support_chat] ProxyAPI error: {}", resp.status());
+            return HttpResponse::ServiceUnavailable().body("service temporarily unavailable");
+        }
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(v) => v["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("Извините, не удалось получить ответ.")
+                .to_string(),
+            Err(e) => {
+                error!("[support_chat] Failed to parse ProxyAPI response: {}", e);
+                return HttpResponse::ServiceUnavailable().body("service temporarily unavailable");
+            }
+        }
+    };
+
+    // 5. Persist user message and AI response
+    let _ = sqlx::query(
+        "INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'user', $2)"
+    )
+    .bind(telegram_id)
+    .bind(user_message)
+    .execute(pool.get_ref())
+    .await;
+
+    let _ = sqlx::query(
+        "INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'assistant', $2)"
+    )
+    .bind(telegram_id)
+    .bind(&ai_response)
+    .execute(pool.get_ref())
+    .await;
+
+    HttpResponse::Ok().json(json!({"response": ai_response}))
 }
