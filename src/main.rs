@@ -7,9 +7,10 @@ use log::{info, warn, error};
 mod models;
 mod jwt;
 mod web_handlers;
-use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest};
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest, SupportChatRequest};
 use sqlx::Row;
 use std::collections::HashMap;
+use std::sync::Arc;
 use chrono::{Duration};
 
 lazy_static::lazy_static! {
@@ -1465,10 +1466,24 @@ async fn main() -> std::io::Result<()> {
         .connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
-    info!("DB connected. Starting HTTP server on 0.0.0.0:8080");
+    info!("DB connected.");
+
+    // Load system prompt for AI support
+    let system_prompt_path = std::env::var("SYSTEM_PROMPT_PATH")
+        .unwrap_or_else(|_| "system_prompt.txt".to_string());
+    let system_prompt = std::fs::read_to_string(&system_prompt_path)
+        .unwrap_or_else(|e| {
+            warn!("Failed to load system prompt from {}: {}. Using default.", system_prompt_path, e);
+            "Вы — ИИ-ассистент службы поддержки SvoiVPN. Помогайте пользователям с вопросами о VPN.".to_string()
+        });
+    let system_prompt = web::Data::new(Arc::new(system_prompt));
+    info!("System prompt loaded ({} chars)", system_prompt.len());
+
+    info!("Starting HTTP server on 0.0.0.0:8080");
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .app_data(system_prompt.clone())
             .service(
                 web::resource("/users")
                     .route(web::get().to(list_users))

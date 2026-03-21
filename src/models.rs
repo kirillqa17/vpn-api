@@ -132,3 +132,8 @@ pub struct ToggleProRequest {
     pub is_pro: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SupportChatRequest {
+    pub message: String,
+}
+

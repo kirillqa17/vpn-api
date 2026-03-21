@@ -5,6 +5,7 @@ use sqlx::postgres::PgPool;
 use sqlx::Row;
 use log::{info, error};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::jwt;
 use chrono::Utc;
@@ -874,6 +875,17 @@ lazy_static::lazy_static! {
     static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
     static ref REMNAWAVE_API_BASE: String = std::env::var("REMNAWAVE_API_BASE").unwrap_or_else(|_| "http://localhost:3000/api".to_string());
     static ref REMNAWAVE_API_KEY: String = std::env::var("REMNAWAVE_API_KEY").expect("REMNAWAVE_API_KEY must be set");
+    static ref PROXYAPI_KEY: String = std::env::var("PROXYAPI_KEY")
+        .expect("PROXYAPI_KEY must be set");
+    static ref PROXYAPI_BASE_URL: String = std::env::var("PROXYAPI_BASE_URL")
+        .unwrap_or_else(|_| "https://openai.api.proxyapi.ru/v1".to_string());
+    static ref SUPPORT_BOT_TOKEN: String = std::env::var("SUPPORT_BOT_TOKEN")
+        .expect("SUPPORT_BOT_TOKEN must be set");
+    static ref ADMIN_IDS: Vec<i64> = std::env::var("ADMIN_IDS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
 }
 
 fn remnawave_headers() -> reqwest::header::HeaderMap {
