@@ -148,6 +148,207 @@ pub async fn auth_telegram_login(
     HttpResponse::Ok().json(json!({ "token": token, "telegram_id": telegram_id }))
 }
 
+// === Email auth ===
+
+#[derive(Deserialize)]
+pub struct EmailRegisterRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+pub struct EmailLoginRequest {
+    email: String,
+    password: String,
+}
+
+pub async fn auth_email_register(
+    pool: web::Data<PgPool>,
+    data: web::Json<EmailRegisterRequest>,
+) -> HttpResponse {
+    let email = data.email.trim().to_lowercase();
+    let password = &data.password;
+
+    if !email.contains('@') || email.len() < 5 {
+        return HttpResponse::BadRequest().body("Invalid email");
+    }
+    if password.len() < 8 {
+        return HttpResponse::BadRequest().body("Password must be at least 8 characters");
+    }
+
+    // Check if email already taken
+    let exists = sqlx::query("SELECT id FROM user_credentials WHERE email = $1")
+        .bind(&email)
+        .fetch_optional(pool.get_ref())
+        .await;
+
+    match exists {
+        Ok(Some(_)) => return HttpResponse::Conflict().body("Email already registered"),
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        _ => {}
+    }
+
+    // Generate synthetic negative telegram_id
+    let synthetic_id: i64 = match sqlx::query_scalar::<_, i64>("SELECT -nextval('email_user_id_seq')")
+        .fetch_one(pool.get_ref())
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to generate ID: {}", e)),
+    };
+
+    // Hash password
+    use argon2::{Argon2, PasswordHasher};
+    use argon2::password_hash::SaltString;
+    use rand::rngs::OsRng;
+
+    let salt = SaltString::generate(&mut OsRng);
+    let password_hash = match Argon2::default().hash_password(password.as_bytes(), &salt) {
+        Ok(h) => h.to_string(),
+        Err(_) => return HttpResponse::InternalServerError().body("Failed to hash password"),
+    };
+
+    // Create user in Remnawave + DB (reuse auto_register_user)
+    let username = email.split('@').next().unwrap_or("user").to_string();
+    if let Err(resp) = auto_register_user(pool.get_ref(), synthetic_id, Some(username)).await {
+        return resp;
+    }
+
+    // Save credentials
+    let result = sqlx::query(
+        "INSERT INTO user_credentials (telegram_id, email, password_hash) VALUES ($1, $2, $3)"
+    )
+    .bind(synthetic_id)
+    .bind(&email)
+    .bind(&password_hash)
+    .execute(pool.get_ref())
+    .await;
+
+    if let Err(e) = result {
+        error!("[auth_email_register] Failed to save credentials: {}", e);
+        return HttpResponse::InternalServerError().body("Failed to save credentials");
+    }
+
+    let token = match jwt::create_token(synthetic_id) {
+        Ok(t) => t,
+        Err(_) => return HttpResponse::InternalServerError().body("Failed to create token"),
+    };
+
+    info!("[auth_email_register] Registered email user {} (id={})", email, synthetic_id);
+    HttpResponse::Ok().json(json!({ "token": token, "telegram_id": synthetic_id }))
+}
+
+pub async fn auth_email_login(
+    pool: web::Data<PgPool>,
+    data: web::Json<EmailLoginRequest>,
+) -> HttpResponse {
+    let email = data.email.trim().to_lowercase();
+
+    let row = match sqlx::query("SELECT telegram_id, password_hash FROM user_credentials WHERE email = $1")
+        .bind(&email)
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::Unauthorized().body("Invalid email or password"),
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    let telegram_id: i64 = row.get("telegram_id");
+    let stored_hash: String = row.get("password_hash");
+
+    // Verify password
+    use argon2::{Argon2, PasswordVerifier};
+    use argon2::password_hash::PasswordHash;
+
+    let parsed_hash = match PasswordHash::new(&stored_hash) {
+        Ok(h) => h,
+        Err(_) => return HttpResponse::InternalServerError().body("Invalid stored hash"),
+    };
+
+    if Argon2::default().verify_password(data.password.as_bytes(), &parsed_hash).is_err() {
+        return HttpResponse::Unauthorized().body("Invalid email or password");
+    }
+
+    let token = match jwt::create_token(telegram_id) {
+        Ok(t) => t,
+        Err(_) => return HttpResponse::InternalServerError().body("Failed to create token"),
+    };
+
+    info!("[auth_email_login] Email login: {} (id={})", email, telegram_id);
+    HttpResponse::Ok().json(json!({ "token": token, "telegram_id": telegram_id }))
+}
+
+pub async fn auth_link_email(
+    pool: web::Data<PgPool>,
+    req: HttpRequest,
+    data: web::Json<EmailRegisterRequest>,
+) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    let email = data.email.trim().to_lowercase();
+    let password = &data.password;
+
+    if !email.contains('@') || email.len() < 5 {
+        return HttpResponse::BadRequest().body("Invalid email");
+    }
+    if password.len() < 8 {
+        return HttpResponse::BadRequest().body("Password must be at least 8 characters");
+    }
+
+    // Check email not taken
+    let exists = sqlx::query("SELECT id FROM user_credentials WHERE email = $1")
+        .bind(&email)
+        .fetch_optional(pool.get_ref())
+        .await;
+
+    match exists {
+        Ok(Some(_)) => return HttpResponse::Conflict().body("Email already taken"),
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        _ => {}
+    }
+
+    // Check user doesn't already have credentials
+    let has_creds = sqlx::query("SELECT id FROM user_credentials WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await;
+
+    if let Ok(Some(_)) = has_creds {
+        return HttpResponse::Conflict().body("Account already has email linked");
+    }
+
+    use argon2::{Argon2, PasswordHasher};
+    use argon2::password_hash::SaltString;
+    use rand::rngs::OsRng;
+
+    let salt = SaltString::generate(&mut OsRng);
+    let password_hash = match Argon2::default().hash_password(password.as_bytes(), &salt) {
+        Ok(h) => h.to_string(),
+        Err(_) => return HttpResponse::InternalServerError().body("Failed to hash password"),
+    };
+
+    let result = sqlx::query(
+        "INSERT INTO user_credentials (telegram_id, email, password_hash) VALUES ($1, $2, $3)"
+    )
+    .bind(telegram_id)
+    .bind(&email)
+    .bind(&password_hash)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(_) => {
+            info!("[auth_link_email] Linked email {} to user {}", email, telegram_id);
+            HttpResponse::Ok().json(json!({"status": "ok"}))
+        }
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
 // === User info ===
 
 pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
@@ -165,6 +366,16 @@ pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespon
     .bind(telegram_id)
     .fetch_optional(pool.get_ref())
     .await;
+
+    // Get linked email if exists
+    let email_row = sqlx::query("SELECT email FROM user_credentials WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await
+        .ok()
+        .flatten();
+
+    let email: Option<String> = email_row.map(|r| r.get("email"));
 
     match user {
         Ok(Some(row)) => {
@@ -190,6 +401,7 @@ pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespon
                 "auto_renew_duration": row.get::<Option<String>, _>("auto_renew_duration").unwrap_or_default(),
                 "is_pro": row.get::<bool, _>("is_pro"),
                 "card_last4": row.get::<Option<String>, _>("card_last4").unwrap_or_default(),
+                "email": email,
             }))
         }
         Ok(None) => HttpResponse::NotFound().body("User not found"),
