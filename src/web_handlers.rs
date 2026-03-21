@@ -474,7 +474,11 @@ pub async fn auth_merge_email_account(
         return HttpResponse::InternalServerError().body(e.to_string());
     }
 
-    // Move credentials to new telegram_id
+    // Move credentials: delete any existing creds for target, then transfer email creds
+    let _ = sqlx::query("DELETE FROM user_credentials WHERE telegram_id = $1")
+        .bind(tg_id)
+        .execute(pool.get_ref())
+        .await;
     let _ = sqlx::query("UPDATE user_credentials SET telegram_id = $1 WHERE telegram_id = $2")
         .bind(tg_id)
         .bind(email_user_id)
@@ -497,7 +501,11 @@ pub async fn auth_merge_email_account(
     .execute(pool.get_ref())
     .await;
 
-    // Delete old email user account
+    // Delete old email user (credentials already moved above, clean any remaining)
+    let _ = sqlx::query("DELETE FROM user_credentials WHERE telegram_id = $1")
+        .bind(email_user_id)
+        .execute(pool.get_ref())
+        .await;
     let _ = sqlx::query("DELETE FROM users WHERE telegram_id = $1")
         .bind(email_user_id)
         .execute(pool.get_ref())
