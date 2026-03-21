@@ -137,3 +137,14 @@ pub struct SupportChatRequest {
     pub message: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct InternalSupportChatRequest {
+    pub telegram_id: i64,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InternalSupportEscalateRequest {
+    pub telegram_id: i64,
+}
+

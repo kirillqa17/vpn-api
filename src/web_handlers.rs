@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::jwt;
-use crate::models::SupportChatRequest;
+use crate::models::{SupportChatRequest, InternalSupportChatRequest, InternalSupportEscalateRequest};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -1960,6 +1960,396 @@ pub async fn web_support_escalate(
             }
             Err(e) => {
                 error!("[support_escalate] Failed to notify admin {}: {}", admin_id, e);
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(json!({"status": "escalated"}))
+}
+
+// === Internal support endpoints (no JWT - called by bot from Docker network) ===
+
+pub async fn internal_support_chat(
+    pool: web::Data<PgPool>,
+    body: web::Json<InternalSupportChatRequest>,
+    system_prompt: web::Data<Arc<String>>,
+) -> HttpResponse {
+    let telegram_id = body.telegram_id;
+
+    // Input validation
+    let user_message = body.message.trim();
+    if user_message.is_empty() {
+        return HttpResponse::BadRequest().body("Message cannot be empty");
+    }
+
+    // 1. Fetch user context from DB
+    let user_row = sqlx::query(
+        "SELECT plan, subscription_end, is_active, device_limit, is_pro FROM users WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    let user_context = match user_row {
+        Ok(Some(row)) => format!(
+            "Контекст пользователя: тариф={}, подписка_до={}, активен={}, лимит_устройств={}, PRO={}",
+            row.get::<String, _>("plan"),
+            row.get::<chrono::DateTime<chrono::Utc>, _>("subscription_end").to_rfc3339(),
+            row.get::<i32, _>("is_active"),
+            row.get::<i64, _>("device_limit"),
+            row.get::<bool, _>("is_pro"),
+        ),
+        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Err(e) => {
+            error!("[internal_support_chat] DB error fetching user {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+    };
+
+    // 2. Fetch last 40 messages from support_chats
+    let history = sqlx::query(
+        "SELECT role, content FROM support_chats WHERE telegram_id = $1 ORDER BY created_at DESC LIMIT 40"
+    )
+    .bind(telegram_id)
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_default();
+
+    // 3. Build messages array for ProxyAPI
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    messages.push(json!({"role": "system", "content": system_prompt.as_str()}));
+    messages.push(json!({"role": "system", "content": user_context}));
+
+    // First message: disclose AI identity
+    if history.is_empty() {
+        messages.push(json!({
+            "role": "assistant",
+            "content": "Здравствуйте! Я — ИИ-ассистент службы поддержки SvoiVPN. Чем могу Вам помочь?"
+        }));
+    } else {
+        // Add history in chronological order (reverse the DESC result)
+        let hist_messages: Vec<serde_json::Value> = history.iter().rev().map(|row| {
+            json!({
+                "role": row.get::<String, _>("role"),
+                "content": row.get::<String, _>("content")
+            })
+        }).collect();
+        messages.extend(hist_messages);
+    }
+
+    messages.push(json!({"role": "user", "content": user_message}));
+
+    // 4. Define function calling tools
+    let tools = json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "get_user_info",
+                "description": "Получить информацию о пользователе: тариф, статус подписки, ссылку на подписку, PRO режим, лимит устройств. Вызывайте когда пользователь спрашивает о своей подписке, ссылке, устройствах или статусе.",
+                "parameters": {"type": "object", "properties": {}, "required": []}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "toggle_pro",
+                "description": "Включить или выключить PRO режим для пользователя. PRO добавляет протоколы gRPC и Trojan для обхода блокировок. Вызывайте ТОЛЬКО после подтверждения пользователя.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "enable": {"type": "boolean", "description": "true для включения PRO, false для выключения"}
+                    },
+                    "required": ["enable"]
+                }
+            }
+        }
+    ]);
+
+    // 5. Call ProxyAPI with tools (tool call dispatch loop, max 3 iterations)
+    let mut ai_response = String::new();
+    let max_iterations = 3;
+
+    for iteration in 0..max_iterations {
+        let request_body = json!({
+            "model": "gemini/gemini-2.0-flash",
+            "temperature": 0.3,
+            "max_tokens": 1024,
+            "messages": messages,
+            "tools": tools
+        });
+
+        let api_result = HTTP_CLIENT
+            .post(format!("{}/chat/completions", *PROXYAPI_BASE_URL))
+            .header("Authorization", format!("Bearer {}", *PROXYAPI_KEY))
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await;
+
+        let resp_json = match api_result {
+            Err(e) => {
+                error!("[internal_support_chat] ProxyAPI call failed (iteration {}): {}", iteration, e);
+                return HttpResponse::ServiceUnavailable().body("service temporarily unavailable");
+            }
+            Ok(resp) if !resp.status().is_success() => {
+                error!("[internal_support_chat] ProxyAPI error (iteration {}): {}", iteration, resp.status());
+                return HttpResponse::ServiceUnavailable().body("service temporarily unavailable");
+            }
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("[internal_support_chat] Failed to parse ProxyAPI response (iteration {}): {}", iteration, e);
+                    return HttpResponse::ServiceUnavailable().body("service temporarily unavailable");
+                }
+            }
+        };
+
+        let choice = &resp_json["choices"][0]["message"];
+
+        // Check for tool_calls
+        let tool_calls = choice.get("tool_calls").and_then(|tc| tc.as_array());
+
+        if let Some(calls) = tool_calls {
+            if !calls.is_empty() {
+                // Append assistant message with tool_calls to messages
+                messages.push(choice.clone());
+
+                // Process each tool call
+                for tool_call in calls {
+                    let call_id = tool_call["id"].as_str().unwrap_or("unknown");
+                    let function_name = tool_call["function"]["name"].as_str().unwrap_or("");
+                    let arguments_str = tool_call["function"]["arguments"].as_str().unwrap_or("{}");
+
+                    let tool_result = match function_name {
+                        "get_user_info" => {
+                            // Direct DB query for user info
+                            match sqlx::query(
+                                "SELECT telegram_id, plan, subscription_end, is_active, device_limit, is_pro, sub_link, username FROM users WHERE telegram_id = $1"
+                            )
+                            .bind(telegram_id)
+                            .fetch_optional(pool.get_ref())
+                            .await {
+                                Ok(Some(row)) => {
+                                    let sub_end: chrono::DateTime<chrono::Utc> = row.get("subscription_end");
+                                    let sub_end_formatted = sub_end.format("%d.%m.%Y %H:%M MSK").to_string();
+                                    json!({
+                                        "plan": row.get::<String, _>("plan"),
+                                        "subscription_end": sub_end_formatted,
+                                        "is_active": row.get::<i32, _>("is_active") != 0,
+                                        "device_limit": row.get::<i64, _>("device_limit"),
+                                        "is_pro": row.get::<bool, _>("is_pro"),
+                                        "sub_link": row.get::<String, _>("sub_link"),
+                                        "username": row.get::<Option<String>, _>("username")
+                                    }).to_string()
+                                }
+                                Ok(None) => json!({"error": "User not found"}).to_string(),
+                                Err(e) => {
+                                    error!("[internal_support_chat] get_user_info DB error: {}", e);
+                                    json!({"error": "Failed to fetch user info"}).to_string()
+                                }
+                            }
+                        }
+                        "toggle_pro" => {
+                            // Parse enable argument
+                            let enable = match serde_json::from_str::<serde_json::Value>(arguments_str) {
+                                Ok(args) => args["enable"].as_bool().unwrap_or(false),
+                                Err(_) => false,
+                            };
+
+                            // Internal HTTP call to toggle_pro endpoint
+                            let toggle_result = HTTP_CLIENT
+                                .patch(format!("http://127.0.0.1:8080/users/{}/pro", telegram_id))
+                                .json(&json!({"is_pro": enable}))
+                                .send()
+                                .await;
+
+                            match toggle_result {
+                                Ok(resp) if resp.status().is_success() => {
+                                    json!({"success": true, "is_pro": enable}).to_string()
+                                }
+                                Ok(resp) => {
+                                    let status = resp.status();
+                                    let body = resp.text().await.unwrap_or_default();
+                                    error!("[internal_support_chat] toggle_pro failed: {} - {}", status, body);
+                                    json!({"success": false, "error": format!("Failed to toggle PRO: {}", status)}).to_string()
+                                }
+                                Err(e) => {
+                                    error!("[internal_support_chat] toggle_pro HTTP error: {}", e);
+                                    json!({"success": false, "error": "Failed to reach toggle_pro endpoint"}).to_string()
+                                }
+                            }
+                        }
+                        _ => {
+                            error!("[internal_support_chat] Unknown tool call: {}", function_name);
+                            json!({"error": format!("Unknown function: {}", function_name)}).to_string()
+                        }
+                    };
+
+                    // Append tool result to messages
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": tool_result
+                    }));
+                }
+
+                // Continue loop to re-call ProxyAPI with tool results
+                continue;
+            }
+        }
+
+        // No tool_calls -- extract final text response
+        ai_response = choice["content"]
+            .as_str()
+            .unwrap_or("Извините, не удалось получить ответ.")
+            .to_string();
+        break;
+    }
+
+    // If we exhausted iterations without getting a text response
+    if ai_response.is_empty() {
+        ai_response = "Извините, произошла ошибка при обработке запроса. Попробуйте ещё раз или свяжитесь с оператором.".to_string();
+    }
+
+    // 6. Persist user message and AI response
+    let _ = sqlx::query(
+        "INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'user', $2)"
+    )
+    .bind(telegram_id)
+    .bind(user_message)
+    .execute(pool.get_ref())
+    .await;
+
+    let _ = sqlx::query(
+        "INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'assistant', $2)"
+    )
+    .bind(telegram_id)
+    .bind(&ai_response)
+    .execute(pool.get_ref())
+    .await;
+
+    HttpResponse::Ok().json(json!({"response": ai_response}))
+}
+
+pub async fn internal_support_escalate(
+    pool: web::Data<PgPool>,
+    body: web::Json<InternalSupportEscalateRequest>,
+) -> HttpResponse {
+    let telegram_id = body.telegram_id;
+
+    // 1. Fetch user info for ticket
+    let user_row = sqlx::query(
+        "SELECT telegram_id, username, plan, subscription_end, is_active, device_limit, is_pro FROM users WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    let user_row = match user_row {
+        Ok(Some(row)) => row,
+        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Err(e) => {
+            error!("[internal_support_escalate] DB error fetching user {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().body(e.to_string());
+        }
+    };
+
+    let username: String = user_row.try_get::<String, _>("username")
+        .unwrap_or_else(|_| "не указан".to_string());
+    let plan: String = user_row.try_get::<String, _>("plan")
+        .unwrap_or_else(|_| "не указан".to_string());
+    let subscription_end: String = user_row.try_get::<chrono::DateTime<chrono::Utc>, _>("subscription_end")
+        .map(|dt| dt.format("%d.%m.%Y %H:%M").to_string())
+        .unwrap_or_else(|_| "не указана".to_string());
+    let is_active: bool = user_row.try_get::<i32, _>("is_active")
+        .map(|v| v != 0)
+        .unwrap_or(false);
+    let device_limit: i64 = user_row.try_get::<i64, _>("device_limit")
+        .unwrap_or(0);
+    let is_pro: bool = user_row.try_get::<bool, _>("is_pro")
+        .unwrap_or(false);
+
+    // 2. Fetch recent chat history (last 10 messages for ticket context)
+    let history = sqlx::query(
+        "SELECT role, content, created_at FROM support_chats WHERE telegram_id = $1 ORDER BY created_at DESC LIMIT 10"
+    )
+    .bind(telegram_id)
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_default();
+
+    // 3. Format ticket text in HTML (Telegram parse_mode)
+    let history_text = if history.is_empty() {
+        "История чата пуста.".to_string()
+    } else {
+        history.iter().rev().map(|row| {
+            let role = row.get::<String, _>("role");
+            let content = row.get::<String, _>("content");
+            let truncated = if content.chars().count() > 200 {
+                let end: String = content.chars().take(200).collect();
+                format!("{}...", end)
+            } else {
+                content
+            };
+            format!("[{}]: {}", role, truncated)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+    };
+
+    let mut ticket_text = format!(
+        "<b>Запрос на поддержку</b>\n\n\
+         <b>Пользователь:</b>\n\
+         Telegram ID: <code>{}</code>\n\
+         Username: {}\n\
+         Тариф: {}\n\
+         Подписка до: {}\n\
+         Активен: {}\n\
+         Устройств: {}\n\
+         PRO: {}\n\n\
+         <b>История чата (последние сообщения):</b>\n{}",
+        telegram_id,
+        username,
+        plan,
+        subscription_end,
+        if is_active { "Да" } else { "Нет" },
+        device_limit,
+        if is_pro { "Да" } else { "Нет" },
+        history_text,
+    );
+
+    // Truncate to 4000 chars max (Telegram limit is 4096)
+    if ticket_text.len() > 4000 {
+        let mut end = 4000;
+        while !ticket_text.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        ticket_text.truncate(end);
+        ticket_text.push_str("...");
+    }
+
+    // 4. Send to each admin via Telegram Bot API
+    let tg_url = format!("https://api.telegram.org/bot{}/sendMessage", *SUPPORT_BOT_TOKEN);
+
+    for admin_id in ADMIN_IDS.iter() {
+        let result = HTTP_CLIENT.post(&tg_url)
+            .json(&json!({
+                "chat_id": admin_id,
+                "text": ticket_text,
+                "parse_mode": "HTML"
+            }))
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                info!("[internal_support_escalate] Sent ticket to admin {}", admin_id);
+            }
+            Ok(resp) => {
+                error!("[internal_support_escalate] Failed to notify admin {}: HTTP {}", admin_id, resp.status());
+            }
+            Err(e) => {
+                error!("[internal_support_escalate] Failed to notify admin {}: {}", admin_id, e);
             }
         }
     }

@@ -7,7 +7,7 @@ use log::{info, warn, error};
 mod models;
 mod jwt;
 mod web_handlers;
-use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest, SupportChatRequest};
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest, SupportChatRequest, InternalSupportChatRequest, InternalSupportEscalateRequest};
 use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1542,6 +1542,11 @@ async fn main() -> std::io::Result<()> {
                 .route(web::delete().to(web_handlers::delete_link_code)))
             .service(web::resource("/internal/merge-by-code")
                 .route(web::post().to(web_handlers::internal_merge_by_code)))
+            // Internal support endpoints (no JWT - bot calls from Docker network)
+            .service(web::resource("/internal/support/chat")
+                .route(web::post().to(web_handlers::internal_support_chat)))
+            .service(web::resource("/internal/support/escalate")
+                .route(web::post().to(web_handlers::internal_support_escalate)))
             .service(web::resource("/web/me")
                 .route(web::get().to(web_handlers::web_get_me)))
             .service(web::resource("/web/me/devices")
