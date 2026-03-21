@@ -1192,7 +1192,7 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
         },
         "confirmation": {
             "type": "redirect",
-            "return_url": format!("https://site.svoivpn.online/?payment_status=success")
+            "return_url": format!("https://svoiweb.ru/?payment_status=success")
         },
         "capture": true,
         "description": description,
@@ -1695,7 +1695,7 @@ pub async fn web_referral_info(pool: web::Data<PgPool>, req: HttpRequest) -> Htt
 
             HttpResponse::Ok().json(json!({
                 "invite_link": format!("https://t.me/svoivless_bot?start={}", telegram_id),
-                "web_invite_link": format!("https://site.svoivpn.online/?ref={}", telegram_id),
+                "web_invite_link": format!("https://svoiweb.ru/?ref={}", telegram_id),
                 "referrals_count": refs_count,
                 "payed_refs": payed_refs,
                 "referrals": referral_list,
