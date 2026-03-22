@@ -1547,6 +1547,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::internal_support_chat)))
             .service(web::resource("/internal/support/escalate")
                 .route(web::post().to(web_handlers::internal_support_escalate)))
+            .service(web::resource("/internal/user-email/{tg_id}")
+                .route(web::get().to(web_handlers::internal_get_user_email)))
             .service(web::resource("/web/me")
                 .route(web::get().to(web_handlers::web_get_me)))
             .service(web::resource("/web/me/devices")

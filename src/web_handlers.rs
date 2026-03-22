@@ -1242,7 +1242,7 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
         _ => "1 месяц",
     };
 
-    // Get username for receipt
+    // Get username and email for receipt
     let username = sqlx::query_scalar::<_, Option<String>>("SELECT username FROM users WHERE telegram_id = $1")
         .bind(telegram_id)
         .fetch_optional(pool.get_ref())
@@ -1252,7 +1252,20 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
         .flatten()
         .unwrap_or_else(|| format!("{}", telegram_id));
 
-    let description = format!("SvoiVPN {} {} (@{}, {}) [Сайт]", tariff_name, duration_name, username, telegram_id);
+    let user_email = sqlx::query_scalar::<_, String>("SELECT email FROM user_credentials WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await
+        .ok()
+        .flatten();
+
+    // Email users (negative ID) show email, TG users show @username
+    let description = if telegram_id < 0 {
+        let email_str = user_email.unwrap_or_else(|| username.clone());
+        format!("SvoiVPN {} {} ({}) [Сайт]", tariff_name, duration_name, email_str)
+    } else {
+        format!("SvoiVPN {} {} (@{}) [Сайт]", tariff_name, duration_name, username)
+    };
     let receipt_email = std::env::var("RECEIPT_EMAIL").unwrap_or_else(|_| "receipt@svoivpn.online".to_string());
 
     let payment_body = json!({
@@ -2425,4 +2438,19 @@ pub async fn internal_support_escalate(
     }
 
     HttpResponse::Ok().json(json!({"status": "escalated"}))
+}
+
+pub async fn internal_get_user_email(pool: web::Data<PgPool>, path: web::Path<i64>) -> HttpResponse {
+    let tg_id = path.into_inner();
+    let email = sqlx::query_scalar::<_, String>("SELECT email FROM user_credentials WHERE telegram_id = $1")
+        .bind(tg_id)
+        .fetch_optional(pool.get_ref())
+        .await
+        .ok()
+        .flatten();
+
+    match email {
+        Some(e) => HttpResponse::Ok().json(json!({"email": e})),
+        None => HttpResponse::Ok().json(json!({"email": serde_json::Value::Null})),
+    }
 }
