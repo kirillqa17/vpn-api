@@ -130,9 +130,18 @@ pub async fn auth_telegram(
 
 pub async fn auth_telegram_login(
     pool: web::Data<PgPool>,
-    data: web::Json<HashMap<String, String>>,
+    data: web::Json<HashMap<String, serde_json::Value>>,
 ) -> HttpResponse {
-    let telegram_id = match jwt::validate_telegram_login(&data) {
+    // Convert all values to strings (Telegram widget sends id as number)
+    let string_data: HashMap<String, String> = data.iter()
+        .map(|(k, v)| (k.clone(), match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            other => other.to_string().trim_matches('"').to_string(),
+        }))
+        .collect();
+
+    let telegram_id = match jwt::validate_telegram_login(&string_data) {
         Some(id) => id,
         None => return HttpResponse::Unauthorized().body("Invalid login data"),
     };
@@ -145,7 +154,7 @@ pub async fn auth_telegram_login(
     match exists {
         Ok(Some(_)) => {}
         Ok(None) => {
-            let username = data.get("username").cloned();
+            let username = string_data.get("username").cloned();
             if let Err(resp) = auto_register_user(pool.get_ref(), telegram_id, username, None).await {
                 return resp;
             }
@@ -746,6 +755,67 @@ pub async fn internal_merge_by_code(pool: web::Data<PgPool>, data: web::Json<Mer
     .execute(pool.get_ref())
     .await;
 
+    // Sync Remnawave: transfer subscription from email user to TG user
+    {
+        let email_uuid = sqlx::query_scalar::<_, uuid::Uuid>("SELECT uuid FROM users WHERE telegram_id = $1")
+            .bind(email_user_id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .ok()
+            .flatten();
+
+        let tg_uuid = sqlx::query_scalar::<_, uuid::Uuid>("SELECT uuid FROM users WHERE telegram_id = $1")
+            .bind(tg_id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .ok()
+            .flatten();
+
+        // Get subscription data from merged user for Remnawave update
+        let sub_end: Option<chrono::DateTime<chrono::Utc>> = email_user.try_get("subscription_end").ok();
+        let device_limit: i64 = email_user.try_get("device_limit").unwrap_or(1);
+        let is_active: i32 = email_user.try_get("is_active").unwrap_or(0);
+
+        // Disable old email user in Remnawave
+        if let Some(uuid) = email_uuid {
+            let _ = HTTP_CLIENT
+                .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
+                .headers(remnawave_headers())
+                .json(&json!({
+                    "uuid": uuid.to_string(),
+                    "status": "DISABLED",
+                }))
+                .send()
+                .await;
+            info!("[merge_by_code] Disabled email user {} in Remnawave", uuid);
+        }
+
+        // Activate TG user in Remnawave with merged subscription
+        if let Some(uuid) = tg_uuid {
+            if is_active > 0 {
+                if let Some(expire) = sub_end {
+                    let traffic_limit: u64 = match device_limit {
+                        1 => 26843545600,   // 25 GB
+                        _ => 53687091200,   // 50 GB for family
+                    };
+                    let _ = HTTP_CLIENT
+                        .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
+                        .headers(remnawave_headers())
+                        .json(&json!({
+                            "uuid": uuid.to_string(),
+                            "status": "ACTIVE",
+                            "trafficLimitBytes": traffic_limit,
+                            "expireAt": expire.to_rfc3339(),
+                            "hwidDeviceLimit": device_limit,
+                        }))
+                        .send()
+                        .await;
+                    info!("[merge_by_code] Activated TG user {} in Remnawave, expires {}", uuid, expire);
+                }
+            }
+        }
+    }
+
     // If trial, extend to 7 days
     if trial_extended {
         let new_expire = Utc::now() + chrono::Duration::days(7);
@@ -757,7 +827,7 @@ pub async fn internal_merge_by_code(pool: web::Data<PgPool>, data: web::Json<Mer
         .execute(pool.get_ref())
         .await;
 
-        // Update Remnawave
+        // Update Remnawave for trial extension
         let tg_uuid = sqlx::query_scalar::<_, uuid::Uuid>("SELECT uuid FROM users WHERE telegram_id = $1")
             .bind(tg_id)
             .fetch_optional(pool.get_ref())
@@ -1182,7 +1252,7 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
         .flatten()
         .unwrap_or_else(|| format!("{}", telegram_id));
 
-    let description = format!("SvoiVPN {} {} (@{}, {})", tariff_name, duration_name, username, telegram_id);
+    let description = format!("SvoiVPN {} {} (@{}, {}) [Сайт]", tariff_name, duration_name, username, telegram_id);
     let receipt_email = std::env::var("RECEIPT_EMAIL").unwrap_or_else(|_| "receipt@svoivpn.online".to_string());
 
     let payment_body = json!({
@@ -1380,7 +1450,7 @@ pub async fn web_create_crypto_payment(
             "currency_type": "crypto",
             "asset": data.currency,
             "amount": format!("{:.8}", crypto_amount),
-            "description": format!("SvoiVPN {} {}", data.tariff, data.duration),
+            "description": format!("SvoiVPN {} {} [Сайт]", data.tariff, data.duration),
             "payload": format!("{}:{}:{}", telegram_id, data.tariff, data.duration),
         }))
         .send()
