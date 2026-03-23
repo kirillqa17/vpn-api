@@ -1873,7 +1873,7 @@ pub async fn web_support_chat(
         .json(&json!({
             "model": "gemini/gemini-2.0-flash",
             "temperature": 0.3,
-            "max_tokens": 1024,
+            "max_tokens": 2048,
             "messages": messages
         }))
         .send()
@@ -2156,7 +2156,7 @@ pub async fn internal_support_chat(
         let request_body = json!({
             "model": "gemini/gemini-2.0-flash",
             "temperature": 0.3,
-            "max_tokens": 1024,
+            "max_tokens": 2048,
             "messages": messages,
             "tools": tools
         });
