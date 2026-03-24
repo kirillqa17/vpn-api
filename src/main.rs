@@ -318,13 +318,15 @@ async fn extend_subscription(
             SET
                 subscription_end = NOW() + $1 * INTERVAL '1 day',
                 is_active = 1,
-                plan = $2
+                plan = $2,
+                device_limit = $4
             WHERE telegram_id = $3
             RETURNING *
             "#,
             days as i32,
             plan,
-            telegram_id
+            telegram_id,
+            device_limit as i64
         )
         .fetch_one(pool.get_ref())
         .await
@@ -336,13 +338,15 @@ async fn extend_subscription(
             SET
                 subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day',
                 is_active = 1,
-                plan = $2
+                plan = $2,
+                device_limit = $4
             WHERE telegram_id = $3
             RETURNING *
             "#,
             days as i32,
             plan,
-            telegram_id
+            telegram_id,
+            device_limit as i64
         )
         .fetch_one(pool.get_ref())
         .await
