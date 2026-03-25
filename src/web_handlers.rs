@@ -794,17 +794,13 @@ pub async fn internal_merge_by_code(pool: web::Data<PgPool>, data: web::Json<Mer
         if let Some(uuid) = tg_uuid {
             if is_active > 0 {
                 if let Some(expire) = sub_end {
-                    let traffic_limit: u64 = match device_limit {
-                        1 => 26843545600,   // 25 GB
-                        _ => 53687091200,   // 50 GB for family
-                    };
                     let _ = HTTP_CLIENT
                         .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
                         .headers(remnawave_headers())
                         .json(&json!({
                             "uuid": uuid.to_string(),
                             "status": "ACTIVE",
-                            "trafficLimitBytes": traffic_limit,
+                            "trafficLimitBytes": 0,
                             "expireAt": expire.to_rfc3339(),
                             "hwidDeviceLimit": device_limit,
                         }))
@@ -842,7 +838,7 @@ pub async fn internal_merge_by_code(pool: web::Data<PgPool>, data: web::Json<Mer
                 .json(&json!({
                     "uuid": uuid.to_string(),
                     "status": "ACTIVE",
-                    "trafficLimitBytes": 26843545600_u64,
+                    "trafficLimitBytes": 0,
                     "expireAt": new_expire.to_rfc3339(),
                     "hwidDeviceLimit": 2,
                 }))
@@ -1154,8 +1150,8 @@ pub async fn web_activate_trial(pool: web::Data<PgPool>, req: HttpRequest) -> Ht
         .json(&json!({
             "uuid": uuid.to_string(),
             "status": "ACTIVE",
-            "trafficLimitBytes": 26843545600_u64,
-            "trafficLimitStrategy": "MONTH",
+            "trafficLimitBytes": 0,
+            "trafficLimitStrategy": "NO_RESET",
             "expireAt": new_expire.to_rfc3339(),
             "hwidDeviceLimit": 2,
             "tag": "TRIAL",

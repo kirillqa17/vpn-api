@@ -198,12 +198,7 @@ async fn extend_subscription(
         _ => 2,
     };
 
-    let traffic_limit: u64 = match plan.as_str() {
-        "base" | "bsbase" => 0,
-        "family" | "bsfamily" => 0,
-        "trial" => 26843545600,
-        _ => 0,
-    };
+    let traffic_limit: u64 = 0; // unlimited for all plans
 
     let tag = match plan.as_str(){
         "base" | "bsbase" => "PAID",
