@@ -2060,6 +2060,17 @@ pub async fn internal_support_chat(
         return HttpResponse::BadRequest().body("Message cannot be empty");
     }
 
+    // 0. Check maintenance mode
+    let maintenance = sqlx::query(
+        "SELECT value FROM support_settings WHERE key = 'maintenance_mode'"
+    )
+    .fetch_optional(pool.get_ref())
+    .await
+    .ok()
+    .flatten()
+    .map(|row| row.get::<String, _>("value") == "true")
+    .unwrap_or(false);
+
     // 1. Fetch user context from DB
     let user_row = sqlx::query(
         "SELECT plan, subscription_end, is_active, device_limit, is_pro FROM users WHERE telegram_id = $1"
@@ -2068,14 +2079,17 @@ pub async fn internal_support_chat(
     .fetch_optional(pool.get_ref())
     .await;
 
+    let maintenance_tag = if maintenance { "\n[MAINTENANCE_MODE: ON]" } else { "" };
+
     let user_context = match user_row {
         Ok(Some(row)) => format!(
-            "Контекст пользователя: тариф={}, подписка_до={}, активен={}, лимит_устройств={}, PRO={}",
+            "Контекст пользователя: тариф={}, подписка_до={}, активен={}, лимит_устройств={}, PRO={}{}",
             row.get::<String, _>("plan"),
             row.get::<chrono::DateTime<chrono::Utc>, _>("subscription_end").to_rfc3339(),
             row.get::<i32, _>("is_active"),
             row.get::<i64, _>("device_limit"),
             row.get::<bool, _>("is_pro"),
+            maintenance_tag,
         ),
         Ok(None) => return HttpResponse::NotFound().body("User not found"),
         Err(e) => {
@@ -2432,6 +2446,21 @@ pub async fn internal_support_escalate(
     }
 
     HttpResponse::Ok().json(json!({"status": "escalated"}))
+}
+
+pub async fn internal_set_maintenance(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let value = if enabled { "true" } else { "false" };
+
+    let _ = sqlx::query(
+        "INSERT INTO support_settings (key, value, updated_at) VALUES ('maintenance_mode', $1, NOW()) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()"
+    )
+    .bind(value)
+    .execute(pool.get_ref())
+    .await;
+
+    info!("[maintenance] mode set to {}", value);
+    HttpResponse::Ok().json(json!({"maintenance": enabled}))
 }
 
 pub async fn internal_get_user_email(pool: web::Data<PgPool>, path: web::Path<i64>) -> HttpResponse {
