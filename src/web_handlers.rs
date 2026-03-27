@@ -22,7 +22,12 @@ pub struct TelegramAuthRequest {
 
 /// Auto-register a new user (same logic as create_user in main.rs)
 async fn auto_register_user(pool: &PgPool, telegram_id: i64, username: Option<String>, referral_id: Option<i64>) -> Result<(), HttpResponse> {
-    let username = username.unwrap_or_else(|| format!("user_{}", telegram_id));
+    let raw_username = username.unwrap_or_else(|| format!("user_{}", telegram_id));
+    // Remnawave only accepts [a-zA-Z0-9_-] — sanitize username
+    let username: String = raw_username.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let username = if username.is_empty() { format!("user_{}", telegram_id) } else { username };
     info!("[auto_register] Creating user {} ({}) referral={:?}", telegram_id, username, referral_id);
 
     // Create in Remnawave
@@ -48,8 +53,10 @@ async fn auto_register_user(pool: &PgPool, telegram_id: i64, username: Option<St
         })?;
 
     if !api_response.status().is_success() {
-        error!("[auto_register] Remnawave error for {}: {}", telegram_id, api_response.status());
-        return Err(HttpResponse::InternalServerError().body("Remnawave API error"));
+        let status = api_response.status();
+        let body = api_response.text().await.unwrap_or_default();
+        error!("[auto_register] Remnawave error for {} ({}): {}", telegram_id, status, body);
+        return Err(HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", body)));
     }
 
     let json_response: serde_json::Value = api_response.json().await.map_err(|e| {
