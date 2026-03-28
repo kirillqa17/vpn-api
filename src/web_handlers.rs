@@ -2501,3 +2501,270 @@ pub async fn internal_get_user_email(pool: web::Data<PgPool>, path: web::Path<i6
         None => HttpResponse::Ok().json(json!({"email": serde_json::Value::Null})),
     }
 }
+
+// === Admin endpoints ===
+
+/// GET /admin/chats - List recent chats grouped by telegram_id
+pub async fn admin_list_chats(pool: web::Data<PgPool>) -> HttpResponse {
+    // Get last message per user with user info
+    let rows = sqlx::query(
+        "SELECT DISTINCT ON (sc.telegram_id) \
+            sc.telegram_id, sc.role, sc.content, sc.created_at, \
+            u.username \
+         FROM support_chats sc \
+         LEFT JOIN users u ON u.telegram_id = sc.telegram_id \
+         ORDER BY sc.telegram_id, sc.created_at DESC"
+    )
+    .fetch_all(pool.get_ref())
+    .await;
+
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => {
+            error!("[admin_list_chats] DB error: {}", e);
+            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+        }
+    };
+
+    // Get message counts per user
+    let counts = sqlx::query(
+        "SELECT telegram_id, COUNT(*) as cnt FROM support_chats GROUP BY telegram_id"
+    )
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_default();
+
+    let count_map: HashMap<i64, i64> = counts.iter()
+        .map(|row| (row.get::<i64, _>("telegram_id"), row.get::<i64, _>("cnt")))
+        .collect();
+
+    let mut chats: Vec<serde_json::Value> = rows.iter().map(|row| {
+        let tg_id: i64 = row.get("telegram_id");
+        let message_count = count_map.get(&tg_id).copied().unwrap_or(0);
+        json!({
+            "telegram_id": tg_id,
+            "username": row.try_get::<String, _>("username").unwrap_or_default(),
+            "last_message": row.get::<String, _>("content"),
+            "last_role": row.get::<String, _>("role"),
+            "last_time": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
+            "message_count": message_count,
+        })
+    }).collect();
+
+    // Sort by last_time DESC (most recent first)
+    chats.sort_by(|a, b| {
+        let time_a = a["last_time"].as_str().unwrap_or("");
+        let time_b = b["last_time"].as_str().unwrap_or("");
+        time_b.cmp(time_a)
+    });
+
+    info!("[admin_list_chats] Returned {} chats", chats.len());
+    HttpResponse::Ok().json(chats)
+}
+
+/// GET /admin/chats/{telegram_id} - Full chat history for a user
+pub async fn admin_get_chat(pool: web::Data<PgPool>, path: web::Path<i64>) -> HttpResponse {
+    let telegram_id = path.into_inner();
+
+    // Fetch user info
+    let user_row = sqlx::query(
+        "SELECT telegram_id, username, plan, subscription_end, is_active, is_pro, sub_link, device_limit \
+         FROM users WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    let user_info = match user_row {
+        Ok(Some(row)) => json!({
+            "telegram_id": row.get::<i64, _>("telegram_id"),
+            "username": row.try_get::<String, _>("username").unwrap_or_default(),
+            "plan": row.try_get::<String, _>("plan").unwrap_or_default(),
+            "subscription_end": row.get::<chrono::DateTime<chrono::Utc>, _>("subscription_end").to_rfc3339(),
+            "is_active": row.get::<i32, _>("is_active"),
+            "is_pro": row.get::<bool, _>("is_pro"),
+            "sub_link": row.try_get::<String, _>("sub_link").unwrap_or_default(),
+            "device_limit": row.get::<i64, _>("device_limit"),
+        }),
+        Ok(None) => json!({"telegram_id": telegram_id, "username": null, "plan": null}),
+        Err(e) => {
+            error!("[admin_get_chat] DB error fetching user {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+        }
+    };
+
+    // Fetch chat messages
+    let messages = sqlx::query(
+        "SELECT role, content, created_at FROM support_chats \
+         WHERE telegram_id = $1 ORDER BY created_at ASC"
+    )
+    .bind(telegram_id)
+    .fetch_all(pool.get_ref())
+    .await;
+
+    let messages = match messages {
+        Ok(rows) => rows.iter().map(|row| {
+            json!({
+                "role": row.get::<String, _>("role"),
+                "content": row.get::<String, _>("content"),
+                "time": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
+            })
+        }).collect::<Vec<_>>(),
+        Err(e) => {
+            error!("[admin_get_chat] DB error fetching messages for {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+        }
+    };
+
+    info!("[admin_get_chat] Returned {} messages for user {}", messages.len(), telegram_id);
+    HttpResponse::Ok().json(json!({
+        "user": user_info,
+        "messages": messages,
+    }))
+}
+
+/// POST /admin/chats/{telegram_id}/reply - Admin sends reply to user
+pub async fn admin_reply_chat(
+    pool: web::Data<PgPool>,
+    path: web::Path<i64>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    let telegram_id = path.into_inner();
+
+    let message = match body.get("message").and_then(|v| v.as_str()) {
+        Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+        _ => return HttpResponse::BadRequest().json(json!({"error": "message is required and cannot be empty"})),
+    };
+
+    // Verify user exists
+    let user_exists = sqlx::query("SELECT telegram_id FROM users WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await;
+
+    match user_exists {
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "User not found"})),
+        Err(e) => {
+            error!("[admin_reply_chat] DB error checking user {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+        }
+        _ => {}
+    }
+
+    // Insert admin message into support_chats
+    let result = sqlx::query(
+        "INSERT INTO support_chats (telegram_id, role, content, created_at) VALUES ($1, 'admin', $2, NOW())"
+    )
+    .bind(telegram_id)
+    .bind(&message)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(_) => {
+            info!("[admin_reply_chat] Admin replied to user {} ({} chars)", telegram_id, message.len());
+            HttpResponse::Ok().json(json!({"status": "sent", "telegram_id": telegram_id}))
+        }
+        Err(e) => {
+            error!("[admin_reply_chat] DB error inserting reply for {}: {}", telegram_id, e);
+            HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// GET /admin/tickets - List escalated/admin-involved chats
+pub async fn admin_list_tickets(pool: web::Data<PgPool>) -> HttpResponse {
+    let rows = sqlx::query(
+        "SELECT DISTINCT sc.telegram_id, u.username, \
+            (SELECT content FROM support_chats WHERE telegram_id = sc.telegram_id ORDER BY created_at DESC LIMIT 1) as last_message, \
+            (SELECT created_at FROM support_chats WHERE telegram_id = sc.telegram_id ORDER BY created_at DESC LIMIT 1) as last_time \
+         FROM support_chats sc \
+         LEFT JOIN users u ON u.telegram_id = sc.telegram_id \
+         WHERE sc.content LIKE '%оператор%' OR sc.content LIKE '%Передаю%' OR sc.role = 'admin' \
+         ORDER BY last_time DESC"
+    )
+    .fetch_all(pool.get_ref())
+    .await;
+
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => {
+            error!("[admin_list_tickets] DB error: {}", e);
+            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+        }
+    };
+
+    let tickets: Vec<serde_json::Value> = rows.iter().map(|row| {
+        json!({
+            "telegram_id": row.get::<i64, _>("telegram_id"),
+            "username": row.try_get::<String, _>("username").unwrap_or_default(),
+            "last_message": row.try_get::<String, _>("last_message").unwrap_or_default(),
+            "last_time": row.try_get::<chrono::DateTime<chrono::Utc>, _>("last_time")
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_default(),
+        })
+    }).collect();
+
+    info!("[admin_list_tickets] Returned {} tickets", tickets.len());
+    HttpResponse::Ok().json(tickets)
+}
+
+/// POST /admin/users/{telegram_id}/reset-password - Reset user password
+pub async fn admin_reset_password(
+    pool: web::Data<PgPool>,
+    path: web::Path<i64>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    let telegram_id = path.into_inner();
+
+    let new_password = match body.get("new_password").and_then(|v| v.as_str()) {
+        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+        _ => return HttpResponse::BadRequest().json(json!({"error": "new_password is required and cannot be empty"})),
+    };
+
+    // Verify user_credentials record exists
+    let cred_exists = sqlx::query("SELECT telegram_id FROM user_credentials WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await;
+
+    match cred_exists {
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "No credentials found for this user"})),
+        Err(e) => {
+            error!("[admin_reset_password] DB error checking credentials for {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+        }
+        _ => {}
+    }
+
+    // Hash the new password with argon2
+    use argon2::{Argon2, PasswordHasher};
+    use argon2::password_hash::SaltString;
+    use rand::rngs::OsRng;
+
+    let salt = SaltString::generate(&mut OsRng);
+    let password_hash = match Argon2::default().hash_password(new_password.as_bytes(), &salt) {
+        Ok(h) => h.to_string(),
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"error": "Failed to hash password"})),
+    };
+
+    // Update password_hash in user_credentials
+    let result = sqlx::query(
+        "UPDATE user_credentials SET password_hash = $1 WHERE telegram_id = $2"
+    )
+    .bind(&password_hash)
+    .bind(telegram_id)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(_) => {
+            info!("[admin_reset_password] Password reset for user {}", telegram_id);
+            HttpResponse::Ok().json(json!({"status": "password_reset", "telegram_id": telegram_id}))
+        }
+        Err(e) => {
+            error!("[admin_reset_password] DB error updating password for {}: {}", telegram_id, e);
+            HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))
+        }
+    }
+}
