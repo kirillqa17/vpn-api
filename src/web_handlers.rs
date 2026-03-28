@@ -2675,13 +2675,17 @@ pub async fn admin_reply_chat(
 /// GET /admin/tickets - List escalated/admin-involved chats
 pub async fn admin_list_tickets(pool: web::Data<PgPool>) -> HttpResponse {
     let rows = sqlx::query(
-        "SELECT DISTINCT sc.telegram_id, u.username, \
+        "SELECT DISTINCT ON (sc.telegram_id) sc.telegram_id, u.username, \
             (SELECT content FROM support_chats WHERE telegram_id = sc.telegram_id ORDER BY created_at DESC LIMIT 1) as last_message, \
-            (SELECT created_at FROM support_chats WHERE telegram_id = sc.telegram_id ORDER BY created_at DESC LIMIT 1) as last_time \
+            (SELECT created_at FROM support_chats WHERE telegram_id = sc.telegram_id ORDER BY created_at DESC LIMIT 1) as last_time, \
+            (SELECT content FROM support_chats WHERE telegram_id = sc.telegram_id ORDER BY created_at DESC LIMIT 1) as last_content_check, \
+            (SELECT COUNT(*) FROM support_chats WHERE telegram_id = sc.telegram_id AND content LIKE '%закрыл тикет%') as closed_count, \
+            (SELECT MAX(created_at) FROM support_chats WHERE telegram_id = sc.telegram_id AND (content LIKE '%оператор%' OR content LIKE '%Передаю%')) as escalated_at, \
+            (SELECT MAX(created_at) FROM support_chats WHERE telegram_id = sc.telegram_id AND content LIKE '%закрыл тикет%') as closed_at \
          FROM support_chats sc \
          LEFT JOIN users u ON u.telegram_id = sc.telegram_id \
          WHERE sc.content LIKE '%оператор%' OR sc.content LIKE '%Передаю%' OR sc.role = 'admin' \
-         ORDER BY last_time DESC"
+         ORDER BY sc.telegram_id, last_time DESC"
     )
     .fetch_all(pool.get_ref())
     .await;
@@ -2694,7 +2698,15 @@ pub async fn admin_list_tickets(pool: web::Data<PgPool>) -> HttpResponse {
         }
     };
 
-    let tickets: Vec<serde_json::Value> = rows.iter().map(|row| {
+    let mut tickets: Vec<serde_json::Value> = rows.iter().map(|row| {
+        let escalated_at = row.try_get::<chrono::DateTime<chrono::Utc>, _>("escalated_at").ok();
+        let closed_at = row.try_get::<chrono::DateTime<chrono::Utc>, _>("closed_at").ok();
+        // Ticket is closed if closed_at is after escalated_at
+        let is_closed = match (escalated_at, closed_at) {
+            (Some(e), Some(c)) => c > e,
+            _ => false,
+        };
+
         json!({
             "telegram_id": row.get::<i64, _>("telegram_id"),
             "username": row.try_get::<String, _>("username").unwrap_or_default(),
@@ -2702,8 +2714,20 @@ pub async fn admin_list_tickets(pool: web::Data<PgPool>) -> HttpResponse {
             "last_time": row.try_get::<chrono::DateTime<chrono::Utc>, _>("last_time")
                 .map(|t| t.to_rfc3339())
                 .unwrap_or_default(),
+            "status": if is_closed { "closed" } else { "open" },
         })
     }).collect();
+
+    // Sort: open first, then by time desc
+    tickets.sort_by(|a, b| {
+        let a_open = a["status"].as_str() == Some("open");
+        let b_open = b["status"].as_str() == Some("open");
+        match (a_open, b_open) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => b["last_time"].as_str().cmp(&a["last_time"].as_str()),
+        }
+    });
 
     info!("[admin_list_tickets] Returned {} tickets", tickets.len());
     HttpResponse::Ok().json(tickets)
