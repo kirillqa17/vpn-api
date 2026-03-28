@@ -1596,6 +1596,12 @@ async fn main() -> std::io::Result<()> {
                 .route(web::get().to(web_handlers::admin_list_tickets)))
             .service(web::resource("/admin/users/{telegram_id}/reset-password")
                 .route(web::post().to(web_handlers::admin_reset_password)))
+            .service(web::resource("/admin/tickets/open")
+                .route(web::post().to(web_handlers::admin_open_ticket)))
+            .service(web::resource("/admin/tickets/close")
+                .route(web::post().to(web_handlers::admin_close_ticket)))
+            .service(web::resource("/admin/tickets/active")
+                .route(web::get().to(web_handlers::admin_active_tickets)))
     })
     .bind("0.0.0.0:8080")?
     .run()

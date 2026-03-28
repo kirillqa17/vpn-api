@@ -2792,3 +2792,60 @@ pub async fn admin_reset_password(
         }
     }
 }
+
+/// POST /admin/tickets/open - Open a ticket
+pub async fn admin_open_ticket(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    let telegram_id = body.get("telegram_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let username = body.get("username").and_then(|v| v.as_str()).unwrap_or("");
+    let reason = body.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+
+    let _ = sqlx::query(
+        "INSERT INTO support_tickets (telegram_id, username, reason, status, created_at) \
+         VALUES ($1, $2, $3, 'open', NOW()) \
+         ON CONFLICT (telegram_id) DO UPDATE SET status = 'open', reason = $3, closed_at = NULL"
+    )
+    .bind(telegram_id)
+    .bind(username)
+    .bind(reason)
+    .execute(pool.get_ref())
+    .await;
+
+    info!("[admin_open_ticket] Opened ticket for {}", telegram_id);
+    HttpResponse::Ok().json(json!({"status": "opened"}))
+}
+
+/// POST /admin/tickets/close - Close a ticket
+pub async fn admin_close_ticket(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    let telegram_id = body.get("telegram_id").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    let _ = sqlx::query(
+        "UPDATE support_tickets SET status = 'closed', closed_at = NOW() WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .execute(pool.get_ref())
+    .await;
+
+    info!("[admin_close_ticket] Closed ticket for {}", telegram_id);
+    HttpResponse::Ok().json(json!({"status": "closed"}))
+}
+
+/// GET /admin/tickets/active - List active (open) tickets
+pub async fn admin_active_tickets(pool: web::Data<PgPool>) -> HttpResponse {
+    let rows = sqlx::query("SELECT telegram_id, username, reason, created_at FROM support_tickets WHERE status = 'open' ORDER BY created_at DESC")
+        .fetch_all(pool.get_ref())
+        .await;
+
+    match rows {
+        Ok(rows) => {
+            let tickets: Vec<serde_json::Value> = rows.iter().map(|r| {
+                json!({
+                    "telegram_id": r.get::<i64, _>("telegram_id"),
+                    "username": r.try_get::<String, _>("username").unwrap_or_default(),
+                    "reason": r.try_get::<String, _>("reason").unwrap_or_default(),
+                })
+            }).collect();
+            HttpResponse::Ok().json(tickets)
+        }
+        Err(e) => HttpResponse::InternalServerError().json(json!({"error": e.to_string()})),
+    }
+}
