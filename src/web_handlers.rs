@@ -2672,6 +2672,34 @@ pub async fn admin_reply_chat(
     }
 }
 
+/// GET /admin/photo/{file_id} - Get Telegram photo URL
+pub async fn admin_get_photo(path: web::Path<String>) -> HttpResponse {
+    let file_id = path.into_inner();
+    let bot_token = std::env::var("BOT_TOKEN_SUPPORT").unwrap_or_default();
+    if bot_token.is_empty() {
+        return HttpResponse::InternalServerError().json(json!({"error": "Bot token not configured"}));
+    }
+
+    // Call Telegram getFile API
+    let url = format!("https://api.telegram.org/bot{}/getFile?file_id={}", bot_token, file_id);
+    match HTTP_CLIENT.get(&url).send().await {
+        Ok(resp) => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(data) => {
+                    if let Some(file_path) = data["result"]["file_path"].as_str() {
+                        let photo_url = format!("https://api.telegram.org/file/bot{}/{}", bot_token, file_path);
+                        HttpResponse::Ok().json(json!({"url": photo_url}))
+                    } else {
+                        HttpResponse::NotFound().json(json!({"error": "File not found"}))
+                    }
+                }
+                Err(e) => HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))
+            }
+        }
+        Err(e) => HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))
+    }
+}
+
 /// POST /admin/chats/{telegram_id}/save - Save a message to chat history
 pub async fn admin_save_chat_message(pool: web::Data<PgPool>, path: web::Path<i64>, body: web::Json<serde_json::Value>) -> HttpResponse {
     let telegram_id = path.into_inner();

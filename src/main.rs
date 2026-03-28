@@ -1594,6 +1594,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::admin_reply_chat)))
             .service(web::resource("/admin/chats/{telegram_id}/save")
                 .route(web::post().to(web_handlers::admin_save_chat_message)))
+            .service(web::resource("/admin/photo/{file_id}")
+                .route(web::get().to(web_handlers::admin_get_photo)))
             .service(web::resource("/admin/tickets")
                 .route(web::get().to(web_handlers::admin_list_tickets)))
             .service(web::resource("/admin/users/{telegram_id}/reset-password")
