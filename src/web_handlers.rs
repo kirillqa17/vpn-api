@@ -2455,6 +2455,23 @@ pub async fn internal_support_escalate(
     HttpResponse::Ok().json(json!({"status": "escalated"}))
 }
 
+pub async fn app_get_maintenance(pool: web::Data<PgPool>) -> HttpResponse {
+    let maintenance = sqlx::query(
+        "SELECT value FROM support_settings WHERE key = 'maintenance_mode'"
+    )
+    .fetch_optional(pool.get_ref())
+    .await
+    .ok()
+    .flatten()
+    .map(|row| row.get::<String, _>("value") == "true")
+    .unwrap_or(false);
+
+    HttpResponse::Ok().json(json!({
+        "maintenance": maintenance,
+        "message": if maintenance { "Ведутся технические работы. Обновите подписку после завершения." } else { "" }
+    }))
+}
+
 pub async fn internal_set_maintenance(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>) -> HttpResponse {
     let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
     let value = if enabled { "true" } else { "false" };
