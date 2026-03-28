@@ -2672,6 +2672,28 @@ pub async fn admin_reply_chat(
     }
 }
 
+/// POST /admin/chats/{telegram_id}/save - Save a message to chat history
+pub async fn admin_save_chat_message(pool: web::Data<PgPool>, path: web::Path<i64>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    let telegram_id = path.into_inner();
+    let role = body.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+    if content.is_empty() {
+        return HttpResponse::BadRequest().json(json!({"error": "content is required"}));
+    }
+
+    let _ = sqlx::query(
+        "INSERT INTO support_chats (telegram_id, role, content, created_at) VALUES ($1, $2, $3, NOW())"
+    )
+    .bind(telegram_id)
+    .bind(role)
+    .bind(content)
+    .execute(pool.get_ref())
+    .await;
+
+    HttpResponse::Ok().json(json!({"status": "saved"}))
+}
+
 /// GET /admin/tickets - List escalated/admin-involved chats
 pub async fn admin_list_tickets(pool: web::Data<PgPool>) -> HttpResponse {
     let rows = sqlx::query(
