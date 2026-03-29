@@ -7,6 +7,7 @@ use log::{info, warn, error};
 mod models;
 mod jwt;
 mod web_handlers;
+mod email;
 use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest, SupportChatRequest, InternalSupportChatRequest, InternalSupportEscalateRequest};
 use sqlx::Row;
 use std::collections::HashMap;
@@ -1467,6 +1468,9 @@ async fn main() -> std::io::Result<()> {
         .unwrap();
     info!("DB connected.");
 
+    // Initialize SMTP for email verification
+    email::init();
+
     // Load system prompt for AI support
     let system_prompt_path = std::env::var("SYSTEM_PROMPT_PATH")
         .unwrap_or_else(|_| "system_prompt.txt".to_string());
@@ -1532,15 +1536,12 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::auth_email_login)))
             .service(web::resource("/web/auth/link-email")
                 .route(web::post().to(web_handlers::auth_link_email)))
-            .service(web::resource("/web/auth/merge-email")
-                .route(web::post().to(web_handlers::auth_merge_email_account)))
-            .service(web::resource("/web/auth/link-code")
-                .route(web::post().to(web_handlers::generate_link_code)))
-            .service(web::resource("/web/auth/link-code/{code}")
-                .route(web::get().to(web_handlers::resolve_link_code))
-                .route(web::delete().to(web_handlers::delete_link_code)))
-            .service(web::resource("/internal/merge-by-code")
-                .route(web::post().to(web_handlers::internal_merge_by_code)))
+            .service(web::resource("/web/auth/verify-email")
+                .route(web::post().to(web_handlers::auth_verify_email)))
+            .service(web::resource("/web/auth/forgot-password")
+                .route(web::post().to(web_handlers::auth_forgot_password)))
+            .service(web::resource("/web/auth/reset-password")
+                .route(web::post().to(web_handlers::auth_reset_password)))
             // Internal support endpoints (no JWT - bot calls from Docker network)
             .service(web::resource("/internal/support/chat")
                 .route(web::post().to(web_handlers::internal_support_chat)))
