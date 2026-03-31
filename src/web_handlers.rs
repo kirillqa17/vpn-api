@@ -135,47 +135,7 @@ pub async fn auth_telegram(
     HttpResponse::Ok().json(json!({ "token": token, "telegram_id": telegram_id }))
 }
 
-pub async fn auth_telegram_login(
-    pool: web::Data<PgPool>,
-    data: web::Json<HashMap<String, serde_json::Value>>,
-) -> HttpResponse {
-    // Convert all values to strings (Telegram widget sends id as number)
-    let string_data: HashMap<String, String> = data.iter()
-        .map(|(k, v)| (k.clone(), match v {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Number(n) => n.to_string(),
-            other => other.to_string().trim_matches('"').to_string(),
-        }))
-        .collect();
-
-    let telegram_id = match jwt::validate_telegram_login(&string_data) {
-        Some(id) => id,
-        None => return HttpResponse::Unauthorized().body("Invalid login data"),
-    };
-
-    let exists = sqlx::query("SELECT telegram_id FROM users WHERE telegram_id = $1")
-        .bind(telegram_id)
-        .fetch_optional(pool.get_ref())
-        .await;
-
-    match exists {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            let username = string_data.get("username").cloned();
-            if let Err(resp) = auto_register_user(pool.get_ref(), telegram_id, username, None).await {
-                return resp;
-            }
-        }
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
-    }
-
-    let token = match jwt::create_token(telegram_id) {
-        Ok(t) => t,
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to create token"),
-    };
-
-    HttpResponse::Ok().json(json!({ "token": token, "telegram_id": telegram_id }))
-}
+// auth_telegram_login (Widget) — REMOVED, replaced by bot-based flow
 
 // === Email auth ===
 
@@ -524,6 +484,103 @@ pub async fn auth_reset_password(
 
     info!("[auth_reset_password] Password reset for {}", email);
     HttpResponse::Ok().json(json!({ "message": "Пароль успешно изменён" }))
+}
+
+// === Telegram auth from mobile app ===
+
+pub async fn auth_telegram_init(pool: web::Data<PgPool>) -> HttpResponse {
+    use rand::Rng;
+    let code: String = rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(16)
+        .map(char::from)
+        .collect();
+
+    let result = sqlx::query(
+        "INSERT INTO telegram_auth_codes (code, expires_at) VALUES ($1, NOW() + INTERVAL '5 minutes')"
+    )
+    .bind(&code)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(_) => {
+            info!("[auth_telegram_init] Created auth code: {}", code);
+            HttpResponse::Ok().json(json!({ "code": code }))
+        }
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
+pub async fn auth_telegram_check(
+    pool: web::Data<PgPool>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let code = path.into_inner();
+
+    let row = match sqlx::query(
+        "SELECT telegram_id FROM telegram_auth_codes WHERE code = $1 AND expires_at > NOW()"
+    )
+    .bind(&code)
+    .fetch_optional(pool.get_ref())
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "Code expired or not found"})),
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+
+    let tg_id: Option<i64> = row.get("telegram_id");
+
+    match tg_id {
+        Some(id) => {
+            // Confirmed — generate JWT and cleanup
+            let _ = sqlx::query("DELETE FROM telegram_auth_codes WHERE code = $1")
+                .bind(&code)
+                .execute(pool.get_ref())
+                .await;
+
+            let token = match jwt::create_token(id) {
+                Ok(t) => t,
+                Err(_) => return HttpResponse::InternalServerError().body("Failed to create token"),
+            };
+
+            info!("[auth_telegram_check] Auth confirmed for tg_id={}", id);
+            HttpResponse::Ok().json(json!({ "token": token, "telegram_id": id }))
+        }
+        None => {
+            // Not yet confirmed — still pending
+            HttpResponse::Accepted().json(json!({ "status": "pending" }))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct TelegramConfirmRequest {
+    pub code: String,
+    pub telegram_id: i64,
+}
+
+pub async fn auth_telegram_confirm(
+    pool: web::Data<PgPool>,
+    data: web::Json<TelegramConfirmRequest>,
+) -> HttpResponse {
+    let result = sqlx::query(
+        "UPDATE telegram_auth_codes SET telegram_id = $1 WHERE code = $2 AND expires_at > NOW() AND telegram_id IS NULL"
+    )
+    .bind(data.telegram_id)
+    .bind(&data.code)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => {
+            info!("[auth_telegram_confirm] Code {} confirmed by tg_id={}", data.code, data.telegram_id);
+            HttpResponse::Ok().json(json!({ "status": "ok" }))
+        }
+        Ok(_) => HttpResponse::NotFound().body("Code not found or expired"),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
 }
 
 pub async fn auth_link_email(
