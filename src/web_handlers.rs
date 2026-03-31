@@ -897,13 +897,9 @@ pub async fn web_activate_trial(pool: web::Data<PgPool>, req: HttpRequest) -> Ht
         return HttpResponse::BadRequest().body("Trial already used");
     }
 
-    // Email users (negative id) get 1 hour, Telegram users get 7 days
-    let is_email_user = telegram_id < 0;
-    let (interval_sql, duration) = if is_email_user {
-        ("INTERVAL '1 hour'", chrono::Duration::hours(1))
-    } else {
-        ("INTERVAL '7 days'", chrono::Duration::days(7))
-    };
+    // All users get 7 days trial (email verified via 2FA)
+    let interval_sql = "INTERVAL '7 days'";
+    let duration = chrono::Duration::days(7);
 
     let result = sqlx::query(&format!(
         "UPDATE users SET is_used_trial = true, is_active = 1, plan = 'trial', \
