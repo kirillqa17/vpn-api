@@ -933,7 +933,7 @@ pub async fn web_activate_trial(pool: web::Data<PgPool>, req: HttpRequest) -> Ht
         .send()
         .await;
 
-    HttpResponse::Ok().json(json!({"status": "ok", "is_email_trial": is_email_user}))
+    HttpResponse::Ok().json(json!({"status": "ok"}))
 }
 
 // === Payment creation ===
