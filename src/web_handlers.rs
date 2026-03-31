@@ -1036,7 +1036,7 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
     } else {
         format!("SvoiVPN {} {} (@{}) [Сайт]", tariff_name, duration_name, username)
     };
-    let receipt_email = std::env::var("RECEIPT_EMAIL").unwrap_or_else(|_| "receipt@svoivpn.online".to_string());
+    let receipt_email = std::env::var("RECEIPT_EMAIL").unwrap_or_else(|_| "receipt@svoi-connect.ru".to_string());
 
     let payment_body = json!({
         "amount": {
