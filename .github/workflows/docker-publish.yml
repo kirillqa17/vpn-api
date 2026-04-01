@@ -55,7 +55,9 @@ jobs:
             docker rm vpn-api-container || true
 
             echo "Running new container..."
-            # Убедитесь, что порты соответствуют вашему приложению
             docker run -d --name vpn-api-container --add-host host.docker.internal:host-gateway --network vpn-net --network-alias vpn-api -p 8080:8080 --restart unless-stopped --env-file /root/SvoiVPN/.env ${{ secrets.DOCKER_USERNAME }}/vpn-api:latest
+
+            echo "Connecting to remnawave-network..."
+            docker network connect remnawave-network vpn-api-container || true
 
             echo "Deployment complete!"
