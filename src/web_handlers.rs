@@ -247,8 +247,8 @@ pub async fn auth_email_register(
         Err(_) => return HttpResponse::InternalServerError().body("Failed to hash password"),
     };
 
-    // Create user in Remnawave + DB (use full email as username)
-    let username = email.clone();
+    // Create user in Remnawave + DB (sanitize email for Remnawave username)
+    let username = email.replace('@', "_at_").replace('.', "_");
     if let Err(resp) = auto_register_user(pool.get_ref(), synthetic_id, Some(username), data.referral_id).await {
         return resp;
     }
