@@ -1922,6 +1922,69 @@ pub async fn public_support_chat(
     HttpResponse::Ok().json(json!({"response": ai_response}))
 }
 
+pub async fn public_support_escalate(
+    pool: web::Data<PgPool>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    let session_id = body.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+    if session_id.is_empty() {
+        return HttpResponse::BadRequest().json(json!({"error": "session_id required"}));
+    }
+    let telegram_id = session_to_telegram_id(session_id);
+
+    // Fetch recent chat history
+    let history = sqlx::query(
+        "SELECT role, content FROM support_chats WHERE telegram_id = $1 ORDER BY created_at DESC LIMIT 10"
+    )
+    .bind(telegram_id)
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_default();
+
+    let history_text = if history.is_empty() {
+        "История пуста".to_string()
+    } else {
+        history.iter().rev().map(|row| {
+            let role = row.get::<String, _>("role");
+            let content = row.get::<String, _>("content");
+            let truncated = if content.chars().count() > 200 {
+                format!("{}...", content.chars().take(200).collect::<String>())
+            } else { content };
+            format!("[{}]: {}", role, truncated)
+        }).collect::<Vec<_>>().join("\n")
+    };
+
+    let ticket_text = format!(
+        "<b>Запрос на поддержку (сайт, без авторизации)</b>\n\n\
+         <b>Session:</b> <code>{}</code>\n\
+         <b>ID:</b> <code>{}</code>\n\n\
+         <b>История чата:</b>\n{}",
+        session_id, telegram_id, history_text
+    );
+
+    // Send to admins via Telegram
+    let tg_url = format!("https://api.telegram.org/bot{}/sendMessage", *SUPPORT_BOT_TOKEN);
+    for admin_id in ADMIN_IDS.iter() {
+        let _ = HTTP_CLIENT.post(&tg_url)
+            .json(&json!({"chat_id": admin_id, "text": ticket_text, "parse_mode": "HTML"}))
+            .send().await;
+    }
+
+    // Create ticket
+    let _ = sqlx::query(
+        "INSERT INTO support_tickets (telegram_id, username, reason, status, created_at) \
+         VALUES ($1, $2, 'Эскалация с сайта (анон)', 'open', NOW()) \
+         ON CONFLICT (telegram_id) DO UPDATE SET status = 'open', reason = 'Эскалация с сайта (анон)', created_at = NOW()"
+    )
+    .bind(telegram_id)
+    .bind(session_id)
+    .execute(pool.get_ref())
+    .await;
+
+    info!("[public_escalate] Escalated session {} (tg_id={})", session_id, telegram_id);
+    HttpResponse::Ok().json(json!({"status": "escalated"}))
+}
+
 pub async fn web_support_escalate(
     pool: web::Data<PgPool>,
     req: HttpRequest,
