@@ -2386,13 +2386,14 @@ pub async fn internal_get_user_email(pool: web::Data<PgPool>, path: web::Path<i6
 
 /// GET /admin/chats - List recent chats grouped by telegram_id
 pub async fn admin_list_chats(pool: web::Data<PgPool>) -> HttpResponse {
-    // Get last message per user with user info
+    // Get last non-system message per user with user info
     let rows = sqlx::query(
         "SELECT DISTINCT ON (sc.telegram_id) \
             sc.telegram_id, sc.role, sc.content, sc.created_at, \
             u.username \
          FROM support_chats sc \
          LEFT JOIN users u ON u.telegram_id = sc.telegram_id \
+         WHERE sc.content NOT LIKE '[SYSTEM]%' \
          ORDER BY sc.telegram_id, sc.created_at DESC"
     )
     .fetch_all(pool.get_ref())
@@ -2602,20 +2603,14 @@ pub async fn admin_save_chat_message(pool: web::Data<PgPool>, path: web::Path<i6
     HttpResponse::Ok().json(json!({"status": "saved"}))
 }
 
-/// GET /admin/tickets - List escalated/admin-involved chats
+/// GET /admin/tickets - List tickets from support_tickets table
 pub async fn admin_list_tickets(pool: web::Data<PgPool>) -> HttpResponse {
     let rows = sqlx::query(
-        "SELECT DISTINCT ON (sc.telegram_id) sc.telegram_id, u.username, \
-            (SELECT content FROM support_chats WHERE telegram_id = sc.telegram_id ORDER BY created_at DESC LIMIT 1) as last_message, \
-            (SELECT created_at FROM support_chats WHERE telegram_id = sc.telegram_id ORDER BY created_at DESC LIMIT 1) as last_time, \
-            (SELECT content FROM support_chats WHERE telegram_id = sc.telegram_id ORDER BY created_at DESC LIMIT 1) as last_content_check, \
-            (SELECT COUNT(*) FROM support_chats WHERE telegram_id = sc.telegram_id AND content LIKE '%закрыл тикет%') as closed_count, \
-            (SELECT MAX(created_at) FROM support_chats WHERE telegram_id = sc.telegram_id AND (content LIKE '%оператор%' OR content LIKE '%Передаю%')) as escalated_at, \
-            (SELECT MAX(created_at) FROM support_chats WHERE telegram_id = sc.telegram_id AND content LIKE '%закрыл тикет%') as closed_at \
-         FROM support_chats sc \
-         LEFT JOIN users u ON u.telegram_id = sc.telegram_id \
-         WHERE sc.content LIKE '%оператор%' OR sc.content LIKE '%Передаю%' OR sc.role = 'admin' \
-         ORDER BY sc.telegram_id, last_time DESC"
+        "SELECT st.telegram_id, st.username, st.reason, st.status, st.created_at, st.closed_at, \
+            (SELECT content FROM support_chats WHERE telegram_id = st.telegram_id ORDER BY created_at DESC LIMIT 1) as last_message, \
+            (SELECT created_at FROM support_chats WHERE telegram_id = st.telegram_id ORDER BY created_at DESC LIMIT 1) as last_time \
+         FROM support_tickets st \
+         ORDER BY CASE WHEN st.status = 'open' THEN 0 ELSE 1 END, st.created_at DESC"
     )
     .fetch_all(pool.get_ref())
     .await;
@@ -2628,15 +2623,7 @@ pub async fn admin_list_tickets(pool: web::Data<PgPool>) -> HttpResponse {
         }
     };
 
-    let mut tickets: Vec<serde_json::Value> = rows.iter().map(|row| {
-        let escalated_at = row.try_get::<chrono::DateTime<chrono::Utc>, _>("escalated_at").ok();
-        let closed_at = row.try_get::<chrono::DateTime<chrono::Utc>, _>("closed_at").ok();
-        // Ticket is closed if closed_at is after escalated_at
-        let is_closed = match (escalated_at, closed_at) {
-            (Some(e), Some(c)) => c > e,
-            _ => false,
-        };
-
+    let tickets: Vec<serde_json::Value> = rows.iter().map(|row| {
         json!({
             "telegram_id": row.get::<i64, _>("telegram_id"),
             "username": row.try_get::<String, _>("username").unwrap_or_default(),
@@ -2644,20 +2631,9 @@ pub async fn admin_list_tickets(pool: web::Data<PgPool>) -> HttpResponse {
             "last_time": row.try_get::<chrono::DateTime<chrono::Utc>, _>("last_time")
                 .map(|t| t.to_rfc3339())
                 .unwrap_or_default(),
-            "status": if is_closed { "closed" } else { "open" },
+            "status": row.try_get::<String, _>("status").unwrap_or_else(|_| "open".to_string()),
         })
     }).collect();
-
-    // Sort: open first, then by time desc
-    tickets.sort_by(|a, b| {
-        let a_open = a["status"].as_str() == Some("open");
-        let b_open = b["status"].as_str() == Some("open");
-        match (a_open, b_open) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => b["last_time"].as_str().cmp(&a["last_time"].as_str()),
-        }
-    });
 
     info!("[admin_list_tickets] Returned {} tickets", tickets.len());
     HttpResponse::Ok().json(tickets)
