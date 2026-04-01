@@ -1601,6 +1601,11 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::web_support_chat)))
             .service(web::resource("/web/support/escalate")
                 .route(web::post().to(web_handlers::web_support_escalate)))
+            // Public support chat (no JWT)
+            .service(web::resource("/web/support/public/history")
+                .route(web::get().to(web_handlers::public_support_history)))
+            .service(web::resource("/web/support/public/chat")
+                .route(web::post().to(web_handlers::public_support_chat)))
             // Admin endpoints
             .service(web::resource("/admin/chats")
                 .route(web::get().to(web_handlers::admin_list_chats)))

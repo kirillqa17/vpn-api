@@ -1802,6 +1802,126 @@ pub async fn web_support_chat(
     HttpResponse::Ok().json(json!({"response": ai_response}))
 }
 
+// === Public support chat (no JWT required) ===
+
+#[derive(Deserialize)]
+pub struct PublicChatRequest {
+    pub session_id: String,
+    pub message: String,
+}
+
+fn session_to_telegram_id(session_id: &str) -> i64 {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    let hash = hasher.finish();
+    -((hash % 9_000_000 + 3_000_000) as i64) // -3M to -12M range
+}
+
+pub async fn public_support_history(
+    pool: web::Data<PgPool>,
+    query: web::Query<HashMap<String, String>>,
+) -> HttpResponse {
+    let session_id = match query.get("session_id") {
+        Some(s) if !s.is_empty() => s,
+        _ => return HttpResponse::BadRequest().json(json!({"error": "session_id required"})),
+    };
+    let telegram_id = session_to_telegram_id(session_id);
+
+    let rows = sqlx::query(
+        "SELECT role, content, created_at FROM support_chats WHERE telegram_id = $1 AND role != 'system' AND content NOT LIKE '[SYSTEM]%' ORDER BY created_at ASC LIMIT 100"
+    )
+    .bind(telegram_id)
+    .fetch_all(pool.get_ref())
+    .await;
+
+    match rows {
+        Ok(rows) => {
+            let messages: Vec<serde_json::Value> = rows.iter().map(|r| {
+                let role: String = r.get("role");
+                let content: String = r.get("content");
+                let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
+                json!({
+                    "role": if role == "assistant" { "ai".to_string() } else { role },
+                    "content": content,
+                    "created_at": created_at.to_rfc3339()
+                })
+            }).collect();
+            HttpResponse::Ok().json(json!({ "messages": messages, "escalated": false }))
+        }
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }
+    }
+}
+
+pub async fn public_support_chat(
+    pool: web::Data<PgPool>,
+    body: web::Json<PublicChatRequest>,
+    system_prompt: web::Data<Arc<String>>,
+) -> HttpResponse {
+    let session_id = body.session_id.trim();
+    if session_id.is_empty() {
+        return HttpResponse::BadRequest().json(json!({"error": "session_id required"}));
+    }
+    let user_message = body.message.trim();
+    if user_message.is_empty() {
+        return HttpResponse::BadRequest().body("Message cannot be empty");
+    }
+
+    let telegram_id = session_to_telegram_id(session_id);
+    let user_context = "Контекст: анонимный пользователь с сайта (не авторизован)".to_string();
+
+    // Fetch history
+    let history = sqlx::query(
+        "SELECT role, content FROM support_chats WHERE telegram_id = $1 ORDER BY created_at DESC LIMIT 40"
+    )
+    .bind(telegram_id)
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_default();
+
+    // Build messages for AI
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    messages.push(json!({"role": "system", "content": system_prompt.as_str()}));
+    messages.push(json!({"role": "system", "content": user_context}));
+
+    if history.is_empty() {
+        messages.push(json!({"role": "assistant", "content": "Здравствуйте! Я — ИИ-ассистент службы поддержки SvoiVPN. Чем могу Вам помочь?"}));
+    } else {
+        let hist_messages: Vec<serde_json::Value> = history.iter().rev().map(|row| {
+            json!({"role": row.get::<String, _>("role"), "content": row.get::<String, _>("content")})
+        }).collect();
+        messages.extend(hist_messages);
+    }
+    messages.push(json!({"role": "user", "content": user_message}));
+
+    // Call AI
+    let api_result = HTTP_CLIENT
+        .post(format!("{}/chat/completions", *PROXYAPI_BASE_URL))
+        .header("Authorization", format!("Bearer {}", *PROXYAPI_KEY))
+        .header("Content-Type", "application/json")
+        .json(&json!({"model": "gemini/gemini-2.0-flash", "temperature": 0.3, "messages": messages}))
+        .send()
+        .await;
+
+    let ai_response = match api_result {
+        Err(e) => { error!("[public_support_chat] ProxyAPI failed: {}", e); return HttpResponse::ServiceUnavailable().body("service temporarily unavailable"); }
+        Ok(resp) if !resp.status().is_success() => { error!("[public_support_chat] ProxyAPI error: {}", resp.status()); return HttpResponse::ServiceUnavailable().body("service temporarily unavailable"); }
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(v) => v["choices"][0]["message"]["content"].as_str().unwrap_or("Извините, не удалось получить ответ.").to_string(),
+            Err(e) => { error!("[public_support_chat] Parse error: {}", e); return HttpResponse::ServiceUnavailable().body("service temporarily unavailable"); }
+        }
+    };
+
+    // Save messages
+    let _ = sqlx::query("INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'user', $2)")
+        .bind(telegram_id).bind(user_message).execute(pool.get_ref()).await;
+    let _ = sqlx::query("INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'assistant', $2)")
+        .bind(telegram_id).bind(&ai_response).execute(pool.get_ref()).await;
+
+    HttpResponse::Ok().json(json!({"response": ai_response}))
+}
+
 pub async fn web_support_escalate(
     pool: web::Data<PgPool>,
     req: HttpRequest,
