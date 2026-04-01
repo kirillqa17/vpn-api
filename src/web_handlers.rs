@@ -1574,6 +1574,16 @@ pub async fn web_support_history(pool: web::Data<PgPool>, req: HttpRequest) -> H
     .fetch_all(pool.get_ref())
     .await;
 
+    // Check for active ticket
+    let escalated = sqlx::query(
+        "SELECT telegram_id FROM support_tickets WHERE telegram_id = $1 AND status = 'open' LIMIT 1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .unwrap_or(None)
+    .is_some();
+
     match rows {
         Ok(rows) => {
             let messages: Vec<serde_json::Value> = rows.iter().map(|r| {
@@ -1586,7 +1596,7 @@ pub async fn web_support_history(pool: web::Data<PgPool>, req: HttpRequest) -> H
                     "created_at": created_at.to_rfc3339()
                 })
             }).collect();
-            HttpResponse::Ok().json(json!({ "messages": messages }))
+            HttpResponse::Ok().json(json!({ "messages": messages, "escalated": escalated }))
         }
         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
@@ -1633,7 +1643,31 @@ pub async fn web_support_chat(
         }
     };
 
-    // 2. Fetch last 40 messages from support_chats
+    // 2. Check for active ticket — skip AI if escalated
+    let has_ticket = sqlx::query(
+        "SELECT telegram_id FROM support_tickets WHERE telegram_id = $1 AND status = 'open' LIMIT 1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .unwrap_or(None)
+    .is_some();
+
+    if has_ticket {
+        // Save user message but don't call AI
+        let _ = sqlx::query(
+            "INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'user', $2)"
+        )
+        .bind(telegram_id)
+        .bind(user_message)
+        .execute(pool.get_ref())
+        .await;
+
+        info!("[support_chat] User {} has open ticket, skipping AI", telegram_id);
+        return HttpResponse::Ok().json(json!({"response": null, "escalated": true}));
+    }
+
+    // 3. Fetch last 40 messages from support_chats
     let history = sqlx::query(
         "SELECT role, content FROM support_chats WHERE telegram_id = $1 ORDER BY created_at DESC LIMIT 40"
     )
@@ -1642,7 +1676,7 @@ pub async fn web_support_chat(
     .await
     .unwrap_or_default();
 
-    // 3. Build messages array for ProxyAPI
+    // 4. Build messages array for ProxyAPI
     let mut messages: Vec<serde_json::Value> = Vec::new();
     messages.push(json!({"role": "system", "content": system_prompt.as_str()}));
     messages.push(json!({"role": "system", "content": user_context}));
@@ -1846,6 +1880,19 @@ pub async fn web_support_escalate(
             }
         }
     }
+
+    // Create ticket in support_tickets so AI stops responding
+    let _ = sqlx::query(
+        "INSERT INTO support_tickets (telegram_id, username, reason, status, created_at) \
+         VALUES ($1, $2, 'Эскалация через сайт', 'open', NOW()) \
+         ON CONFLICT (telegram_id) DO UPDATE SET status = 'open', reason = 'Эскалация через сайт', created_at = NOW()"
+    )
+    .bind(telegram_id)
+    .bind(&username)
+    .execute(pool.get_ref())
+    .await;
+
+    info!("[support_escalate] Created ticket for user {}", telegram_id);
 
     HttpResponse::Ok().json(json!({"status": "escalated"}))
 }
