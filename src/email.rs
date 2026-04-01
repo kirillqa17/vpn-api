@@ -22,11 +22,21 @@ pub fn init() {
 
     let creds = Credentials::new(user, password);
 
-    let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
-        .expect("Failed to create SMTP transport")
-        .port(port)
-        .credentials(creds)
-        .build();
+    let mailer = if port == 465 {
+        // SMTPS (implicit TLS)
+        AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
+            .expect("Failed to create SMTP transport")
+            .port(port)
+            .credentials(creds)
+            .build()
+    } else {
+        // STARTTLS (port 25 or 587)
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
+            .expect("Failed to create SMTP transport")
+            .port(port)
+            .credentials(creds)
+            .build()
+    };
 
     MAILER.set(mailer).expect("SMTP already initialized");
     SMTP_FROM.set(from).expect("SMTP_FROM already initialized");
