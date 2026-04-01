@@ -1561,6 +1561,37 @@ pub async fn web_referral_info(pool: web::Data<PgPool>, req: HttpRequest) -> Htt
 
 // === AI Support endpoints ===
 
+pub async fn web_support_history(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    let rows = sqlx::query(
+        "SELECT role, content, created_at FROM support_chats WHERE telegram_id = $1 AND role != 'system' AND content NOT LIKE '[SYSTEM]%' ORDER BY created_at ASC LIMIT 100"
+    )
+    .bind(telegram_id)
+    .fetch_all(pool.get_ref())
+    .await;
+
+    match rows {
+        Ok(rows) => {
+            let messages: Vec<serde_json::Value> = rows.iter().map(|r| {
+                let role: String = r.get("role");
+                let content: String = r.get("content");
+                let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
+                json!({
+                    "role": if role == "assistant" { "ai".to_string() } else { role },
+                    "content": content,
+                    "created_at": created_at.to_rfc3339()
+                })
+            }).collect();
+            HttpResponse::Ok().json(json!({ "messages": messages }))
+        }
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
 pub async fn web_support_chat(
     pool: web::Data<PgPool>,
     req: HttpRequest,
@@ -2699,5 +2730,56 @@ pub async fn admin_active_tickets(pool: web::Data<PgPool>) -> HttpResponse {
             HttpResponse::Ok().json(tickets)
         }
         Err(e) => HttpResponse::InternalServerError().json(json!({"error": e.to_string()})),
+    }
+}
+
+// === News ===
+
+pub async fn web_get_news(pool: web::Data<PgPool>) -> HttpResponse {
+    let rows = sqlx::query(
+        "SELECT id, tg_message_id, text, date, media_url FROM news_posts ORDER BY date DESC LIMIT 20"
+    )
+    .fetch_all(pool.get_ref())
+    .await;
+
+    match rows {
+        Ok(rows) => {
+            let posts: Vec<serde_json::Value> = rows.iter().map(|r| {
+                json!({
+                    "id": r.get::<i64, _>("id"),
+                    "text": r.get::<String, _>("text"),
+                    "date": r.get::<chrono::DateTime<chrono::Utc>, _>("date").to_rfc3339(),
+                    "media_url": r.get::<Option<String>, _>("media_url"),
+                })
+            }).collect();
+            HttpResponse::Ok().json(posts)
+        }
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+    }
+}
+
+pub async fn internal_save_news(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    let tg_message_id = body.get("tg_message_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let date = body.get("date").and_then(|v| v.as_str()).unwrap_or("");
+    let media_url = body.get("media_url").and_then(|v| v.as_str());
+
+    if tg_message_id == 0 || text.is_empty() {
+        return HttpResponse::BadRequest().body("tg_message_id and text required");
+    }
+
+    let result = sqlx::query(
+        "INSERT INTO news_posts (tg_message_id, text, date, media_url) VALUES ($1, $2, $3::timestamptz, $4) ON CONFLICT (tg_message_id) DO NOTHING"
+    )
+    .bind(tg_message_id)
+    .bind(text)
+    .bind(date)
+    .bind(media_url)
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
 }
