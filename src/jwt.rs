@@ -6,7 +6,7 @@ use sha2::Sha256;
 use std::collections::HashMap;
 
 lazy_static::lazy_static! {
-    static ref JWT_SECRET: String = std::env::var("JWT_SECRET").unwrap_or_else(|_| "svoivpn-jwt-secret-key-change-me".to_string());
+    static ref JWT_SECRET: String = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     static ref BOT_TOKEN: String = std::env::var("BOT_TOKEN_TG").expect("BOT_TOKEN_TG must be set");
 }
 

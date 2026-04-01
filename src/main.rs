@@ -1,4 +1,4 @@
-use actix_web::{web, App, HttpResponse, HttpServer};
+use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
 use serde_json::json;
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
@@ -36,7 +36,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         }
         Err(e) => {
             error!("[create_user] DB error checking user {}: {}", data.telegram_id, e);
-            return HttpResponse::InternalServerError().body(e.to_string());
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
         _ => {}
     }
@@ -71,20 +71,20 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
         Ok(resp) => resp,
         Err(e) => {
             error!("[create_user] Remnawave API call failed for {}: {}", data.telegram_id, e);
-            return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 
     if !api_response.status().is_success() {
         error!("[create_user] Remnawave API error for {}: {}", data.telegram_id, api_response.status());
-        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
     }
 
     let json_response = match api_response.json::<serde_json::Value>().await {
         Ok(json) => json,
         Err(e) => {
             error!("[create_user] Failed to parse Remnawave response for {}: {}", data.telegram_id, e);
-            return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 
@@ -101,7 +101,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     let user = match sqlx::query_as!(
@@ -128,7 +128,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
     .fetch_one(&mut *tx)
     .await {
         Ok(user) => user,
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     if let Some(referral_id) = referral_id {
@@ -147,7 +147,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
 
     if let Err(e) = tx.commit().await {
         error!("[create_user] TX commit failed for {}: {}", data.telegram_id, e);
-        return HttpResponse::InternalServerError().body(e.to_string());
+        return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
     }
 
     info!("[create_user] Successfully created user {} (uuid={})", user.telegram_id, user.uuid);
@@ -161,7 +161,7 @@ async fn list_users(pool: web::Data<PgPool>) -> HttpResponse {
         .await
     {
         Ok(ids) => ids,
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     HttpResponse::Ok().json(telegram_ids)
@@ -226,7 +226,7 @@ async fn extend_subscription(
         Ok(resp) => resp,
         Err(e) => {
             error!("[extend_subscription] Failed to get user {} from Remnawave: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().body(format!("Failed to get user from remnawave: {}", e));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 
@@ -297,13 +297,13 @@ async fn extend_subscription(
         Ok(resp) => resp,
         Err(e) => {
             error!("[extend_subscription] Remnawave API call failed for {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 
     if !api_response.status().is_success() {
         error!("[extend_subscription] Remnawave API error for {}: {}", telegram_id, api_response.status());
-        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
     }
 
     let result = if plan_changed {
@@ -437,10 +437,10 @@ async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>)
             .execute(pool.get_ref())
             .await {
                 Ok(_) => HttpResponse::Ok().body("Referral added successfully and referral_id updated"),
-                Err(e) => HttpResponse::InternalServerError().body(format!("Error updating referral_id: {}", e)),
+                Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
             }
         },
-        Err(e) => HttpResponse::InternalServerError().body(format!("Error adding referral: {}", e)),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     result
@@ -536,16 +536,16 @@ async fn check_connection(telegram_id: web::Path<i64>) -> HttpResponse {
     .await
     {
         Ok(resp) => resp,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     if !api_response.status().is_success() {
-        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
     }
 
     let json_response = match api_response.json::<serde_json::Value>().await {
         Ok(json) => json,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     let first_connected = json_response["response"][0]["firstConnectedAt"].as_str();
@@ -571,7 +571,7 @@ async fn get_expiring_users(
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     let users = match sqlx::query_as!(
@@ -591,7 +591,7 @@ async fn get_expiring_users(
         Ok(users) => users,
         Err(e) => {
             let _ = tx.rollback().await;
-            return HttpResponse::InternalServerError().body(e.to_string());
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 
@@ -616,12 +616,12 @@ async fn get_expiring_users(
         Ok(_) => (),
         Err(e) => {
             let _ = tx.rollback().await;
-            return HttpResponse::InternalServerError().body(e.to_string());
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
     
     if let Err(e) = tx.commit().await {
-        return HttpResponse::InternalServerError().body(e.to_string());
+        return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
     }
     
     HttpResponse::Ok().json(users)
@@ -631,7 +631,7 @@ async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
     info!("[get_expired_users] Checking for expired users");
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     let users = match sqlx::query_as!(
@@ -650,7 +650,7 @@ async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
         Ok(users) => users,
         Err(e) => {
             let _ = tx.rollback().await;
-            return HttpResponse::InternalServerError().body(e.to_string());
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 
@@ -674,12 +674,12 @@ async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
         Ok(_) => (),
         Err(e) => {
             let _ = tx.rollback().await;
-            return HttpResponse::InternalServerError().body(e.to_string());
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
     
     if let Err(e) = tx.commit().await {
-        return HttpResponse::InternalServerError().body(e.to_string());
+        return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
     }
 
     HttpResponse::Ok().json(users)
@@ -751,11 +751,11 @@ async fn temp_disable_device_limit(
         .await
     {
         Ok(resp) => resp,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e)),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     if !api_response.status().is_success() {
-        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
     }
 
     info!("[temp_disable_device_limit] Disabled limit for user {}, original={}, restoring in 30min", telegram_id, original_limit);
@@ -797,16 +797,16 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     .await
     {
         Ok(resp) => resp,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API get user by tg_id: {}", e)),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     if !api_response.status().is_success() {
-        return HttpResponse::InternalServerError().body(format!("Remnawave API get user by tg_id error: {}", api_response.status()));
+        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
     }
 
     let json_response = match api_response.json::<serde_json::Value>().await {
         Ok(json) => json,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     let uuid_str = match json_response["response"][0]["uuid"].as_str() {
@@ -827,16 +827,16 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     .await
     {
         Ok(resp) => resp,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to call devices remnawave API: {}", e)),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     if !api_response.status().is_success() {
-        return HttpResponse::InternalServerError().body(format!("Remnawave devices API error: {}", api_response.status()));
+        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
     }
 
     let json_response = match api_response.json::<serde_json::Value>().await {
         Ok(json) => json,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to parse API response: {}", e)),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     let devices_amount = match json_response["response"]["total"].as_u64() {
@@ -861,7 +861,7 @@ async fn list_devices(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> H
     {
         Ok(Some(u)) => u.to_string(),
         Ok(None) => return HttpResponse::NotFound().body("User not found"),
-        Err(e) => return HttpResponse::InternalServerError().body(format!("DB error: {}", e)),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     let resp = HTTP_CLIENT
@@ -881,11 +881,11 @@ async fn list_devices(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> H
                     let total = json["response"]["total"].as_u64().unwrap_or(0);
                     HttpResponse::Ok().json(json!({ "devices": devices, "total": total }))
                 }
-                Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+                Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
             }
         }
-        Ok(r) => HttpResponse::InternalServerError().body(format!("Remnawave error: {}", r.status())),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Ok(r) => {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) }),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     }
 }
 
@@ -900,7 +900,7 @@ async fn bot_delete_device(pool: web::Data<PgPool>, path: web::Path<(i64, String
     {
         Ok(Some(u)) => u.to_string(),
         Ok(None) => return HttpResponse::NotFound().body("User not found"),
-        Err(e) => return HttpResponse::InternalServerError().body(format!("DB error: {}", e)),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     let resp = HTTP_CLIENT
@@ -915,12 +915,13 @@ async fn bot_delete_device(pool: web::Data<PgPool>, path: web::Path<(i64, String
 
     match resp {
         Ok(r) if r.status().is_success() => HttpResponse::Ok().json(json!({"status": "ok"})),
-        Ok(r) => HttpResponse::InternalServerError().body(format!("Remnawave error: {}", r.status())),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Ok(r) => {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) }),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     }
 }
 
-async fn create_promo(pool: web::Data<PgPool>, data: web::Json<CreatePromoRequest>) -> HttpResponse {
+async fn create_promo(pool: web::Data<PgPool>, data: web::Json<CreatePromoRequest>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = web_handlers::check_admin_key(&req) { return resp; }
     info!("[create_promo] code={}, discount={}%, tariffs={:?}, max_uses={}", data.code, data.discount_percent, data.applicable_tariffs, data.max_uses);
     let result = sqlx::query_as::<_, PromoCode>(
         "INSERT INTO promo_codes (code, discount_percent, applicable_tariffs, max_uses) VALUES ($1, $2, $3, $4) RETURNING *"
@@ -934,11 +935,12 @@ async fn create_promo(pool: web::Data<PgPool>, data: web::Json<CreatePromoReques
 
     match result {
         Ok(promo) => HttpResponse::Ok().json(promo),
-        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to create promo code: {}", e)),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     }
 }
 
-async fn list_promos(pool: web::Data<PgPool>) -> HttpResponse {
+async fn list_promos(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = web_handlers::check_admin_key(&req) { return resp; }
     let result = sqlx::query_as::<_, PromoCode>(
         "SELECT * FROM promo_codes ORDER BY created_at DESC"
     )
@@ -947,11 +949,12 @@ async fn list_promos(pool: web::Data<PgPool>) -> HttpResponse {
 
     match result {
         Ok(promos) => HttpResponse::Ok().json(promos),
-        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to list promo codes: {}", e)),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     }
 }
 
-async fn deactivate_promo(pool: web::Data<PgPool>, code: web::Path<String>) -> HttpResponse {
+async fn deactivate_promo(pool: web::Data<PgPool>, code: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = web_handlers::check_admin_key(&req) { return resp; }
     let code = code.into_inner();
     info!("[deactivate_promo] code={}", code);
     let result = sqlx::query("UPDATE promo_codes SET is_active = false WHERE code = $1")
@@ -967,7 +970,7 @@ async fn deactivate_promo(pool: web::Data<PgPool>, code: web::Path<String>) -> H
                 HttpResponse::Ok().json(json!({"status": "deactivated", "code": code}))
             }
         }
-        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to deactivate promo code: {}", e)),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     }
 }
 
@@ -983,7 +986,7 @@ async fn validate_promo(pool: web::Data<PgPool>, data: web::Json<ValidatePromoRe
     let promo = match promo {
         Ok(Some(p)) => p,
         Ok(None) => return HttpResponse::Ok().json(json!({"valid": false, "reason": "Промокод не найден"})),
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     if !promo.is_active {
@@ -1017,7 +1020,7 @@ async fn use_promo(pool: web::Data<PgPool>, data: web::Json<UsePromoRequest>) ->
     info!("[use_promo] code={}, telegram_id={}", data.code, data.telegram_id);
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     let promo: Option<(i32,)> = match sqlx::query_as(
@@ -1027,7 +1030,7 @@ async fn use_promo(pool: web::Data<PgPool>, data: web::Json<UsePromoRequest>) ->
     .fetch_optional(&mut *tx)
     .await {
         Ok(p) => p,
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     let promo_id = match promo {
@@ -1043,7 +1046,7 @@ async fn use_promo(pool: web::Data<PgPool>, data: web::Json<UsePromoRequest>) ->
     .execute(&mut *tx)
     .await {
         let _ = tx.rollback().await;
-        return HttpResponse::InternalServerError().body(format!("Failed to record promo usage: {}", e));
+        return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
     }
 
     if let Err(e) = sqlx::query(
@@ -1053,11 +1056,11 @@ async fn use_promo(pool: web::Data<PgPool>, data: web::Json<UsePromoRequest>) ->
     .execute(&mut *tx)
     .await {
         let _ = tx.rollback().await;
-        return HttpResponse::InternalServerError().body(format!("Failed to update promo usage count: {}", e));
+        return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
     }
 
     if let Err(e) = tx.commit().await {
-        return HttpResponse::InternalServerError().body(e.to_string());
+        return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
     }
 
     HttpResponse::Ok().json(json!({"status": "ok"}))
@@ -1089,7 +1092,7 @@ async fn save_payment_method(
                 HttpResponse::Ok().json(json!({"status": "ok"}))
             }
         }
-        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to save payment method: {}", e)),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     }
 }
 
@@ -1114,7 +1117,7 @@ async fn delete_payment_method(
                 HttpResponse::Ok().json(json!({"status": "ok"}))
             }
         }
-        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to delete payment method: {}", e)),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     }
 }
 
@@ -1135,7 +1138,7 @@ async fn toggle_auto_renew(
         .fetch_optional(pool.get_ref())
         .await {
             Ok(u) => u,
-            Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+            Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
         };
 
         match user {
@@ -1164,7 +1167,7 @@ async fn toggle_auto_renew(
 
         match result {
             Ok(_) => HttpResponse::Ok().json(json!({"status": "ok", "auto_renew": true})),
-            Err(e) => HttpResponse::InternalServerError().body(format!("Failed to enable auto_renew: {}", e)),
+            Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
         }
     } else {
         let result = sqlx::query(
@@ -1176,7 +1179,7 @@ async fn toggle_auto_renew(
 
         match result {
             Ok(_) => HttpResponse::Ok().json(json!({"status": "ok", "auto_renew": false})),
-            Err(e) => HttpResponse::InternalServerError().body(format!("Failed to disable auto_renew: {}", e)),
+            Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
         }
     }
 }
@@ -1213,7 +1216,7 @@ async fn get_auto_renew_users(
     .fetch_all(pool.get_ref())
     .await {
         Ok(users) => users,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to get auto_renew users: {}", e)),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     HttpResponse::Ok().json(users)
@@ -1237,7 +1240,7 @@ async fn record_auto_renew_attempt(
 
         match result {
             Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
-            Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+            Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
         }
     } else {
         // Increment fail count and update last_attempt
@@ -1257,7 +1260,7 @@ async fn record_auto_renew_attempt(
 
         match result {
             Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
-            Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+            Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
         }
     }
 }
@@ -1299,20 +1302,20 @@ async fn toggle_pro(
         Ok(resp) => resp,
         Err(e) => {
             error!("[toggle_pro] Failed to get user {} from Remnawave: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().body(format!("Failed to get user from remnawave: {}", e));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 
     if !get_response.status().is_success() {
         error!("[toggle_pro] Remnawave GET error for {}: {}", telegram_id, get_response.status());
-        return HttpResponse::InternalServerError().body(format!("Remnawave API get error: {}", get_response.status()));
+        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
     }
 
     let json_response = match get_response.json::<serde_json::Value>().await {
         Ok(json) => json,
         Err(e) => {
             error!("[toggle_pro] Failed to parse Remnawave response for {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().body(format!("Failed to parse response: {}", e));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 
@@ -1352,13 +1355,13 @@ async fn toggle_pro(
         Ok(resp) => resp,
         Err(e) => {
             error!("[toggle_pro] Remnawave PATCH failed for {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 
     if !api_response.status().is_success() {
         error!("[toggle_pro] Remnawave PATCH error for {}: {}", telegram_id, api_response.status());
-        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", api_response.status()));
+        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
     }
 
     // Обновляем is_pro в БД
@@ -1381,7 +1384,7 @@ async fn toggle_pro(
         }
         Err(e) => {
             error!("[toggle_pro] DB update failed for {}: {}", telegram_id, e);
-            HttpResponse::InternalServerError().body(format!("Failed to update is_pro: {}", e))
+            { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) }
         }
     }
 }
@@ -1402,20 +1405,20 @@ async fn get_user_squads(telegram_id: web::Path<i64>) -> HttpResponse {
         Ok(resp) => resp,
         Err(e) => {
             error!("[get_user_squads] Remnawave API call failed for {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().body(format!("Failed to call remnawave API: {}", e));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 
     if !get_response.status().is_success() {
         error!("[get_user_squads] Remnawave API error for {}: {}", telegram_id, get_response.status());
-        return HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", get_response.status()));
+        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
     }
 
     let json_response = match get_response.json::<serde_json::Value>().await {
         Ok(json) => json,
         Err(e) => {
             error!("[get_user_squads] Failed to parse response for {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().body(format!("Failed to parse response: {}", e));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 
@@ -1449,7 +1452,7 @@ async fn get_active_users(pool: web::Data<PgPool>) -> HttpResponse {
         Ok(users) => users,
         Err(e) => {
             error!("[get_active_users] DB error: {}", e);
-            return HttpResponse::InternalServerError().body(e.to_string());
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
         }
     };
 

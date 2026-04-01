@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::postgres::PgPool;
 use sqlx::Row;
-use log::{info, error};
+use log::{info, error, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -11,6 +11,52 @@ use crate::jwt;
 use crate::models::{SupportChatRequest, InternalSupportChatRequest, InternalSupportEscalateRequest};
 use chrono::Utc;
 use uuid::Uuid;
+
+// === Security key validation ===
+
+lazy_static::lazy_static! {
+    static ref ADMIN_KEY: String = std::env::var("ADMIN_KEY").unwrap_or_default();
+    static ref INTERNAL_KEY: String = std::env::var("INTERNAL_KEY").unwrap_or_default();
+    static ref AUTH_ENFORCE: bool = std::env::var("AUTH_ENFORCE").unwrap_or_default() == "true";
+}
+
+/// Check admin key. Returns Some(403) if enforcement is on and key is invalid.
+pub fn check_admin_key(req: &HttpRequest) -> Option<HttpResponse> {
+    if ADMIN_KEY.is_empty() {
+        return None;
+    }
+    let provided = req.headers().get("X-Admin-Key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if provided == ADMIN_KEY.as_str() {
+        return None;
+    }
+    warn!("[AUTH] Invalid admin key from {:?} path={}", req.peer_addr(), req.path());
+    if *AUTH_ENFORCE {
+        Some(HttpResponse::Forbidden().json(json!({"error": "forbidden"})))
+    } else {
+        None
+    }
+}
+
+/// Check internal key. Returns Some(403) if enforcement is on and key is invalid.
+fn check_internal_key(req: &HttpRequest) -> Option<HttpResponse> {
+    if INTERNAL_KEY.is_empty() {
+        return None;
+    }
+    let provided = req.headers().get("X-Internal-Key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if provided == INTERNAL_KEY.as_str() {
+        return None;
+    }
+    warn!("[AUTH] Invalid internal key from {:?} path={}", req.peer_addr(), req.path());
+    if *AUTH_ENFORCE {
+        Some(HttpResponse::Forbidden().json(json!({"error": "forbidden"})))
+    } else {
+        None
+    }
+}
 
 // === Auth endpoints ===
 
@@ -49,19 +95,19 @@ async fn auto_register_user(pool: &PgPool, telegram_id: i64, username: Option<St
         .await
         .map_err(|e| {
             error!("[auto_register] Remnawave API failed for {}: {}", telegram_id, e);
-            HttpResponse::InternalServerError().body(e.to_string())
+            { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }
         })?;
 
     if !api_response.status().is_success() {
         let status = api_response.status();
         let body = api_response.text().await.unwrap_or_default();
         error!("[auto_register] Remnawave error for {} ({}): {}", telegram_id, status, body);
-        return Err(HttpResponse::InternalServerError().body(format!("Remnawave API error: {}", body)));
+        return Err({  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) });
     }
 
     let json_response: serde_json::Value = api_response.json().await.map_err(|e| {
         error!("[auto_register] Failed to parse Remnawave response: {}", e);
-        HttpResponse::InternalServerError().body(e.to_string())
+        { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }
     })?;
 
     let uuid_str = json_response["response"]["uuid"].as_str()
@@ -83,7 +129,7 @@ async fn auto_register_user(pool: &PgPool, telegram_id: i64, username: Option<St
     .await
     .map_err(|e| {
         error!("[auto_register] DB insert failed for {}: {}", telegram_id, e);
-        HttpResponse::InternalServerError().body(e.to_string())
+        { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }
     })?;
 
     // Add to referrer's referrals array
@@ -124,7 +170,7 @@ pub async fn auth_telegram(
                 return resp;
             }
         }
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 
     let token = match jwt::create_token(telegram_id) {
@@ -218,7 +264,7 @@ pub async fn auth_email_register(
                 .execute(pool.get_ref())
                 .await;
         }
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
         _ => {}
     }
 
@@ -233,7 +279,7 @@ pub async fn auth_email_register(
         .await
     {
         Ok(id) => id,
-        Err(e) => return HttpResponse::InternalServerError().body(format!("Failed to generate ID: {}", e)),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     };
 
     // Hash password
@@ -306,7 +352,7 @@ pub async fn auth_verify_email(
     {
         Ok(Some(r)) => r,
         Ok(None) => return HttpResponse::BadRequest().json(json!({"error": "Неверный или просроченный код"})),
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
     let code_id: i64 = row.get("id");
@@ -331,7 +377,7 @@ pub async fn auth_verify_email(
     {
         Ok(Some(r)) => r,
         Ok(None) => return HttpResponse::NotFound().body("User not found"),
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
     let telegram_id: i64 = cred_row.get("telegram_id");
@@ -357,7 +403,7 @@ pub async fn auth_email_login(
     {
         Ok(Some(r)) => r,
         Ok(None) => return HttpResponse::Unauthorized().body("Invalid email or password"),
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
     let telegram_id: i64 = row.get("telegram_id");
@@ -453,7 +499,7 @@ pub async fn auth_reset_password(
     {
         Ok(Some(r)) => r,
         Ok(None) => return HttpResponse::BadRequest().json(json!({"error": "Неверный или просроченный код"})),
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
     let code_id: i64 = row.get("id");
@@ -508,7 +554,7 @@ pub async fn auth_telegram_init(pool: web::Data<PgPool>) -> HttpResponse {
             info!("[auth_telegram_init] Created auth code: {}", code);
             HttpResponse::Ok().json(json!({ "code": code }))
         }
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -527,7 +573,7 @@ pub async fn auth_telegram_check(
     {
         Ok(Some(r)) => r,
         Ok(None) => return HttpResponse::NotFound().json(json!({"error": "Code expired or not found"})),
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
     let tg_id: Option<i64> = row.get("telegram_id");
@@ -564,7 +610,9 @@ pub struct TelegramConfirmRequest {
 pub async fn auth_telegram_confirm(
     pool: web::Data<PgPool>,
     data: web::Json<TelegramConfirmRequest>,
+    req: HttpRequest,
 ) -> HttpResponse {
+    if let Some(resp) = check_internal_key(&req) { return resp; }
     let result = sqlx::query(
         "UPDATE telegram_auth_codes SET telegram_id = $1 WHERE code = $2 AND expires_at > NOW() AND telegram_id IS NULL"
     )
@@ -579,7 +627,7 @@ pub async fn auth_telegram_confirm(
             HttpResponse::Ok().json(json!({ "status": "ok" }))
         }
         Ok(_) => HttpResponse::NotFound().body("Code not found or expired"),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -611,7 +659,7 @@ pub async fn auth_link_email(
 
     match exists {
         Ok(Some(_)) => return HttpResponse::Conflict().body("Email already taken"),
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
         _ => {}
     }
 
@@ -649,7 +697,7 @@ pub async fn auth_link_email(
             info!("[auth_link_email] Linked email {} to user {}", email, telegram_id);
             HttpResponse::Ok().json(json!({"status": "ok"}))
         }
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -710,7 +758,7 @@ pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespon
             }))
         }
         Ok(None) => HttpResponse::NotFound().body("User not found"),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -747,7 +795,7 @@ async fn get_user_uuid(pool: &PgPool, telegram_id: i64) -> Result<String, HttpRe
         .bind(telegram_id)
         .fetch_optional(pool)
         .await
-        .map_err(|e| HttpResponse::InternalServerError().body(e.to_string()))?
+        .map_err(|e| { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) })?
         .ok_or_else(|| HttpResponse::NotFound().body("User not found"))?;
 
     Ok(row.get::<uuid::Uuid, _>("uuid").to_string())
@@ -777,11 +825,11 @@ pub async fn web_get_devices(pool: web::Data<PgPool>, req: HttpRequest) -> HttpR
                     let devices = json["response"]["devices"].clone();
                     HttpResponse::Ok().json(json!({ "devices": devices }))
                 }
-                Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+                Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
             }
         }
-        Ok(r) => HttpResponse::InternalServerError().body(format!("Remnawave error: {}", r.status())),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Ok(r) => {  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -805,8 +853,8 @@ pub async fn web_delete_device(pool: web::Data<PgPool>, req: HttpRequest, hwid: 
 
     match resp {
         Ok(r) if r.status().is_success() => HttpResponse::Ok().json(json!({"status": "ok"})),
-        Ok(r) => HttpResponse::InternalServerError().body(format!("Remnawave error: {}", r.status())),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Ok(r) => {  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -836,11 +884,11 @@ pub async fn web_check_connection(pool: web::Data<PgPool>, req: HttpRequest) -> 
                     let total = json["response"]["total"].as_u64().unwrap_or(0);
                     HttpResponse::Ok().json(json!({ "connected": total > 0 }))
                 }
-                Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+                Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
             }
         }
         Ok(_) => HttpResponse::Ok().json(json!({ "connected": false })),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -890,7 +938,7 @@ pub async fn web_activate_trial(pool: web::Data<PgPool>, req: HttpRequest) -> Ht
     let row = match user {
         Ok(Some(r)) => r,
         Ok(None) => return HttpResponse::NotFound().body("User not found"),
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
     if row.get::<bool, _>("is_used_trial") {
@@ -911,7 +959,7 @@ pub async fn web_activate_trial(pool: web::Data<PgPool>, req: HttpRequest) -> Ht
     .await;
 
     if let Err(e) = result {
-        return HttpResponse::InternalServerError().body(e.to_string());
+        return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
     }
 
     // Update Remnawave
@@ -1101,16 +1149,16 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
                         "payment_id": payment_id,
                     }))
                 }
-                Err(e) => HttpResponse::InternalServerError().body(format!("Parse error: {}", e)),
+                Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
             }
         }
         Ok(r) => {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
             error!("[web_create_payment] YooKassa error {}: {}", status, body);
-            HttpResponse::InternalServerError().body(format!("YooKassa error: {}", status))
+            {  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }
         }
-        Err(e) => HttpResponse::InternalServerError().body(format!("Request error: {}", e)),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     }
 }
 
@@ -1164,11 +1212,11 @@ pub async fn web_payment_status(payment_id: web::Path<String>, req: HttpRequest)
                     let status = json["status"].as_str().unwrap_or("unknown").to_string();
                     HttpResponse::Ok().json(json!({ "status": status }))
                 }
-                Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+                Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
             }
         }
-        Ok(r) => HttpResponse::InternalServerError().body(format!("YooKassa error: {}", r.status())),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Ok(r) => {  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -1254,11 +1302,11 @@ pub async fn web_create_crypto_payment(
                         HttpResponse::InternalServerError().body("CryptoPay error")
                     }
                 }
-                Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+                Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
             }
         }
-        Ok(r) => HttpResponse::InternalServerError().body(format!("CryptoPay error: {}", r.status())),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Ok(r) => {  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -1322,7 +1370,7 @@ pub async fn web_validate_promo(
     let row = match promo {
         Ok(Some(r)) => r,
         Ok(None) => return HttpResponse::Ok().json(json!({"valid": false, "reason": "Промокод не найден"})),
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
     let is_active: bool = row.get("is_active");
@@ -1397,7 +1445,7 @@ pub async fn web_toggle_auto_renew(
 
     match result {
         Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -1424,7 +1472,7 @@ pub async fn web_toggle_pro(
     let row = match user {
         Ok(Some(r)) => r,
         Ok(None) => return HttpResponse::NotFound().body("User not found"),
-        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
     let uuid: uuid::Uuid = row.get("uuid");
@@ -1494,7 +1542,7 @@ pub async fn web_unbind_card(pool: web::Data<PgPool>, req: HttpRequest) -> HttpR
 
     match result {
         Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -1555,7 +1603,7 @@ pub async fn web_referral_info(pool: web::Data<PgPool>, req: HttpRequest) -> Htt
             }))
         }
         Ok(None) => HttpResponse::NotFound().body("User not found"),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -1598,7 +1646,7 @@ pub async fn web_support_history(pool: web::Data<PgPool>, req: HttpRequest) -> H
             }).collect();
             HttpResponse::Ok().json(json!({ "messages": messages, "escalated": escalated }))
         }
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -1639,7 +1687,7 @@ pub async fn web_support_chat(
         Ok(None) => return HttpResponse::NotFound().body("User not found"),
         Err(e) => {
             error!("[support_chat] DB error fetching user {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().body(e.to_string());
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
         }
     };
 
@@ -1776,7 +1824,7 @@ pub async fn web_support_escalate(
         Ok(None) => return HttpResponse::NotFound().body("User not found"),
         Err(e) => {
             error!("[support_escalate] DB error fetching user {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().body(e.to_string());
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
         }
     };
 
@@ -1903,7 +1951,9 @@ pub async fn internal_support_chat(
     pool: web::Data<PgPool>,
     body: web::Json<InternalSupportChatRequest>,
     system_prompt: web::Data<Arc<String>>,
+    req: HttpRequest,
 ) -> HttpResponse {
+    if let Some(resp) = check_internal_key(&req) { return resp; }
     let telegram_id = body.telegram_id;
 
     // Input validation
@@ -1981,7 +2031,7 @@ pub async fn internal_support_chat(
         Ok(None) => return HttpResponse::NotFound().body("User not found"),
         Err(e) => {
             error!("[internal_support_chat] DB error fetching user {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().body(e.to_string());
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
         }
     };
 
@@ -2212,7 +2262,9 @@ pub async fn internal_support_chat(
 pub async fn internal_support_escalate(
     pool: web::Data<PgPool>,
     body: web::Json<InternalSupportEscalateRequest>,
+    req: HttpRequest,
 ) -> HttpResponse {
+    if let Some(resp) = check_internal_key(&req) { return resp; }
     let telegram_id = body.telegram_id;
 
     // 1. Fetch user info for ticket
@@ -2228,7 +2280,7 @@ pub async fn internal_support_escalate(
         Ok(None) => return HttpResponse::NotFound().body("User not found"),
         Err(e) => {
             error!("[internal_support_escalate] DB error fetching user {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().body(e.to_string());
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
         }
     };
 
@@ -2352,7 +2404,8 @@ pub async fn app_get_maintenance(pool: web::Data<PgPool>) -> HttpResponse {
     }))
 }
 
-pub async fn internal_set_maintenance(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>) -> HttpResponse {
+pub async fn internal_set_maintenance(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_internal_key(&req) { return resp; }
     let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
     let value = if enabled { "true" } else { "false" };
 
@@ -2367,7 +2420,8 @@ pub async fn internal_set_maintenance(pool: web::Data<PgPool>, body: web::Json<s
     HttpResponse::Ok().json(json!({"maintenance": enabled}))
 }
 
-pub async fn internal_get_user_email(pool: web::Data<PgPool>, path: web::Path<i64>) -> HttpResponse {
+pub async fn internal_get_user_email(pool: web::Data<PgPool>, path: web::Path<i64>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_internal_key(&req) { return resp; }
     let tg_id = path.into_inner();
     let email = sqlx::query_scalar::<_, String>("SELECT email FROM user_credentials WHERE telegram_id = $1")
         .bind(tg_id)
@@ -2385,7 +2439,8 @@ pub async fn internal_get_user_email(pool: web::Data<PgPool>, path: web::Path<i6
 // === Admin endpoints ===
 
 /// GET /admin/chats - List recent chats grouped by telegram_id
-pub async fn admin_list_chats(pool: web::Data<PgPool>) -> HttpResponse {
+pub async fn admin_list_chats(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
     // Get last non-system message per user with user info
     let rows = sqlx::query(
         "SELECT DISTINCT ON (sc.telegram_id) \
@@ -2403,7 +2458,7 @@ pub async fn admin_list_chats(pool: web::Data<PgPool>) -> HttpResponse {
         Ok(r) => r,
         Err(e) => {
             error!("[admin_list_chats] DB error: {}", e);
-            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
         }
     };
 
@@ -2444,7 +2499,8 @@ pub async fn admin_list_chats(pool: web::Data<PgPool>) -> HttpResponse {
 }
 
 /// GET /admin/chats/{telegram_id} - Full chat history for a user
-pub async fn admin_get_chat(pool: web::Data<PgPool>, path: web::Path<i64>) -> HttpResponse {
+pub async fn admin_get_chat(pool: web::Data<PgPool>, path: web::Path<i64>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
     let telegram_id = path.into_inner();
 
     // Fetch user info
@@ -2470,7 +2526,7 @@ pub async fn admin_get_chat(pool: web::Data<PgPool>, path: web::Path<i64>) -> Ht
         Ok(None) => json!({"telegram_id": telegram_id, "username": null, "plan": null}),
         Err(e) => {
             error!("[admin_get_chat] DB error fetching user {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
         }
     };
 
@@ -2493,7 +2549,7 @@ pub async fn admin_get_chat(pool: web::Data<PgPool>, path: web::Path<i64>) -> Ht
         }).collect::<Vec<_>>(),
         Err(e) => {
             error!("[admin_get_chat] DB error fetching messages for {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
         }
     };
 
@@ -2509,7 +2565,9 @@ pub async fn admin_reply_chat(
     pool: web::Data<PgPool>,
     path: web::Path<i64>,
     body: web::Json<serde_json::Value>,
+    req: HttpRequest,
 ) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
     let telegram_id = path.into_inner();
 
     let message = match body.get("message").and_then(|v| v.as_str()) {
@@ -2527,7 +2585,7 @@ pub async fn admin_reply_chat(
         Ok(None) => return HttpResponse::NotFound().json(json!({"error": "User not found"})),
         Err(e) => {
             error!("[admin_reply_chat] DB error checking user {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
         }
         _ => {}
     }
@@ -2548,13 +2606,14 @@ pub async fn admin_reply_chat(
         }
         Err(e) => {
             error!("[admin_reply_chat] DB error inserting reply for {}: {}", telegram_id, e);
-            HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))
+            { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }
         }
     }
 }
 
 /// GET /admin/photo/{file_id} - Get Telegram photo URL
-pub async fn admin_get_photo(path: web::Path<String>) -> HttpResponse {
+pub async fn admin_get_photo(path: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
     let file_id = path.into_inner();
     let bot_token = std::env::var("BOT_TOKEN_SUPPORT").unwrap_or_default();
     if bot_token.is_empty() {
@@ -2574,15 +2633,16 @@ pub async fn admin_get_photo(path: web::Path<String>) -> HttpResponse {
                         HttpResponse::NotFound().json(json!({"error": "File not found"}))
                     }
                 }
-                Err(e) => HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))
+                Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }
             }
         }
-        Err(e) => HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }
     }
 }
 
 /// POST /admin/chats/{telegram_id}/save - Save a message to chat history
-pub async fn admin_save_chat_message(pool: web::Data<PgPool>, path: web::Path<i64>, body: web::Json<serde_json::Value>) -> HttpResponse {
+pub async fn admin_save_chat_message(pool: web::Data<PgPool>, path: web::Path<i64>, body: web::Json<serde_json::Value>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
     let telegram_id = path.into_inner();
     let role = body.get("role").and_then(|v| v.as_str()).unwrap_or("user");
     let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -2604,7 +2664,8 @@ pub async fn admin_save_chat_message(pool: web::Data<PgPool>, path: web::Path<i6
 }
 
 /// GET /admin/tickets - List tickets from support_tickets table
-pub async fn admin_list_tickets(pool: web::Data<PgPool>) -> HttpResponse {
+pub async fn admin_list_tickets(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
     let rows = sqlx::query(
         "SELECT st.telegram_id, st.username, st.reason, st.status, st.created_at, st.closed_at, \
             (SELECT content FROM support_chats WHERE telegram_id = st.telegram_id ORDER BY created_at DESC LIMIT 1) as last_message, \
@@ -2619,7 +2680,7 @@ pub async fn admin_list_tickets(pool: web::Data<PgPool>) -> HttpResponse {
         Ok(r) => r,
         Err(e) => {
             error!("[admin_list_tickets] DB error: {}", e);
-            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
         }
     };
 
@@ -2644,7 +2705,9 @@ pub async fn admin_reset_password(
     pool: web::Data<PgPool>,
     path: web::Path<i64>,
     body: web::Json<serde_json::Value>,
+    req: HttpRequest,
 ) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
     let telegram_id = path.into_inner();
 
     let new_password = match body.get("new_password").and_then(|v| v.as_str()) {
@@ -2662,7 +2725,7 @@ pub async fn admin_reset_password(
         Ok(None) => return HttpResponse::NotFound().json(json!({"error": "No credentials found for this user"})),
         Err(e) => {
             error!("[admin_reset_password] DB error checking credentials for {}: {}", telegram_id, e);
-            return HttpResponse::InternalServerError().json(json!({"error": e.to_string()}));
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
         }
         _ => {}
     }
@@ -2694,13 +2757,14 @@ pub async fn admin_reset_password(
         }
         Err(e) => {
             error!("[admin_reset_password] DB error updating password for {}: {}", telegram_id, e);
-            HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))
+            { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }
         }
     }
 }
 
 /// POST /admin/tickets/open - Open a ticket
-pub async fn admin_open_ticket(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>) -> HttpResponse {
+pub async fn admin_open_ticket(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
     let telegram_id = body.get("telegram_id").and_then(|v| v.as_i64()).unwrap_or(0);
     let username = body.get("username").and_then(|v| v.as_str()).unwrap_or("");
     let reason = body.get("reason").and_then(|v| v.as_str()).unwrap_or("");
@@ -2721,7 +2785,8 @@ pub async fn admin_open_ticket(pool: web::Data<PgPool>, body: web::Json<serde_js
 }
 
 /// POST /admin/tickets/close - Close a ticket
-pub async fn admin_close_ticket(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>) -> HttpResponse {
+pub async fn admin_close_ticket(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
     let telegram_id = body.get("telegram_id").and_then(|v| v.as_i64()).unwrap_or(0);
 
     let _ = sqlx::query(
@@ -2736,7 +2801,8 @@ pub async fn admin_close_ticket(pool: web::Data<PgPool>, body: web::Json<serde_j
 }
 
 /// GET /admin/tickets/active - List active (open) tickets
-pub async fn admin_active_tickets(pool: web::Data<PgPool>) -> HttpResponse {
+pub async fn admin_active_tickets(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
     let rows = sqlx::query("SELECT telegram_id, username, reason, created_at FROM support_tickets WHERE status = 'open' ORDER BY created_at DESC")
         .fetch_all(pool.get_ref())
         .await;
@@ -2752,7 +2818,7 @@ pub async fn admin_active_tickets(pool: web::Data<PgPool>) -> HttpResponse {
             }).collect();
             HttpResponse::Ok().json(tickets)
         }
-        Err(e) => HttpResponse::InternalServerError().json(json!({"error": e.to_string()})),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
@@ -2777,11 +2843,12 @@ pub async fn web_get_news(pool: web::Data<PgPool>) -> HttpResponse {
             }).collect();
             HttpResponse::Ok().json(posts)
         }
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
 
-pub async fn internal_save_news(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>) -> HttpResponse {
+pub async fn internal_save_news(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_internal_key(&req) { return resp; }
     let tg_message_id = body.get("tg_message_id").and_then(|v| v.as_i64()).unwrap_or(0);
     let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
     let date = body.get("date").and_then(|v| v.as_str()).unwrap_or("");
@@ -2803,6 +2870,6 @@ pub async fn internal_save_news(pool: web::Data<PgPool>, body: web::Json<serde_j
 
     match result {
         Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
