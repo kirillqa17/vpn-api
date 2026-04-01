@@ -1834,6 +1834,41 @@ pub async fn internal_support_chat(
         return HttpResponse::BadRequest().body("Message cannot be empty");
     }
 
+    // Skip AI for system messages — just save to DB and return
+    if user_message.starts_with("[SYSTEM]") {
+        let _ = sqlx::query(
+            "INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'user', $2)"
+        )
+        .bind(telegram_id)
+        .bind(user_message)
+        .execute(pool.get_ref())
+        .await;
+        return HttpResponse::Ok().json(json!({"response": ""}));
+    }
+
+    // Check if user has active ticket — don't call AI
+    let has_ticket = sqlx::query(
+        "SELECT id FROM support_tickets WHERE telegram_id = $1 AND status = 'open' LIMIT 1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+
+    if has_ticket {
+        // Save user message but don't call AI
+        let _ = sqlx::query(
+            "INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'user', $2)"
+        )
+        .bind(telegram_id)
+        .bind(user_message)
+        .execute(pool.get_ref())
+        .await;
+        return HttpResponse::Ok().json(json!({"response": ""}));
+    }
+
     // 0. Check maintenance mode
     let maintenance = sqlx::query(
         "SELECT value FROM support_settings WHERE key = 'maintenance_mode'"
