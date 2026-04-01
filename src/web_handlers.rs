@@ -102,7 +102,7 @@ async fn auto_register_user(pool: &PgPool, telegram_id: i64, username: Option<St
         let status = api_response.status();
         let body = api_response.text().await.unwrap_or_default();
         error!("[auto_register] Remnawave error for {} ({}): {}", telegram_id, status, body);
-        return Err({  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) });
+        return Err(HttpResponse::InternalServerError().json(json!({"error": "internal server error"})));
     }
 
     let json_response: serde_json::Value = api_response.json().await.map_err(|e| {
@@ -828,7 +828,7 @@ pub async fn web_get_devices(pool: web::Data<PgPool>, req: HttpRequest) -> HttpR
                 Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
             }
         }
-        Ok(r) => {  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }),
+        Ok(r) => HttpResponse::InternalServerError().json(json!({"error": "internal server error"})),
         Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
@@ -853,7 +853,7 @@ pub async fn web_delete_device(pool: web::Data<PgPool>, req: HttpRequest, hwid: 
 
     match resp {
         Ok(r) if r.status().is_success() => HttpResponse::Ok().json(json!({"status": "ok"})),
-        Ok(r) => {  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }),
+        Ok(r) => HttpResponse::InternalServerError().json(json!({"error": "internal server error"})),
         Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
@@ -1156,7 +1156,7 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
             error!("[web_create_payment] YooKassa error {}: {}", status, body);
-            {  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }
+            HttpResponse::InternalServerError().json(json!({"error": "internal server error"}))
         }
         Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     }
@@ -1215,7 +1215,7 @@ pub async fn web_payment_status(payment_id: web::Path<String>, req: HttpRequest)
                 Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
             }
         }
-        Ok(r) => {  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }),
+        Ok(r) => HttpResponse::InternalServerError().json(json!({"error": "internal server error"})),
         Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
@@ -1305,7 +1305,7 @@ pub async fn web_create_crypto_payment(
                 Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
             }
         }
-        Ok(r) => {  HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }),
+        Ok(r) => HttpResponse::InternalServerError().json(json!({"error": "internal server error"})),
         Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }

@@ -77,7 +77,7 @@ async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpR
 
     if !api_response.status().is_success() {
         error!("[create_user] Remnawave API error for {}: {}", data.telegram_id, api_response.status());
-        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"}));
     }
 
     let json_response = match api_response.json::<serde_json::Value>().await {
@@ -303,7 +303,7 @@ async fn extend_subscription(
 
     if !api_response.status().is_success() {
         error!("[extend_subscription] Remnawave API error for {}: {}", telegram_id, api_response.status());
-        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"}));
     }
 
     let result = if plan_changed {
@@ -540,7 +540,7 @@ async fn check_connection(telegram_id: web::Path<i64>) -> HttpResponse {
     };
 
     if !api_response.status().is_success() {
-        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"}));
     }
 
     let json_response = match api_response.json::<serde_json::Value>().await {
@@ -755,7 +755,7 @@ async fn temp_disable_device_limit(
     };
 
     if !api_response.status().is_success() {
-        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"}));
     }
 
     info!("[temp_disable_device_limit] Disabled limit for user {}, original={}, restoring in 30min", telegram_id, original_limit);
@@ -801,7 +801,7 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     };
 
     if !api_response.status().is_success() {
-        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"}));
     }
 
     let json_response = match api_response.json::<serde_json::Value>().await {
@@ -831,7 +831,7 @@ async fn get_devices(telegram_id: web::Path<i64>) -> HttpResponse {
     };
 
     if !api_response.status().is_success() {
-        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"}));
     }
 
     let json_response = match api_response.json::<serde_json::Value>().await {
@@ -884,7 +884,7 @@ async fn list_devices(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> H
                 Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
             }
         }
-        Ok(r) => {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) }),
+        Ok(r) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})),
         Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     }
 }
@@ -915,7 +915,7 @@ async fn bot_delete_device(pool: web::Data<PgPool>, path: web::Path<(i64, String
 
     match resp {
         Ok(r) if r.status().is_success() => HttpResponse::Ok().json(json!({"status": "ok"})),
-        Ok(r) => {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) }),
+        Ok(r) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})),
         Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
     }
 }
@@ -1308,7 +1308,7 @@ async fn toggle_pro(
 
     if !get_response.status().is_success() {
         error!("[toggle_pro] Remnawave GET error for {}: {}", telegram_id, get_response.status());
-        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"}));
     }
 
     let json_response = match get_response.json::<serde_json::Value>().await {
@@ -1361,7 +1361,7 @@ async fn toggle_pro(
 
     if !api_response.status().is_success() {
         error!("[toggle_pro] Remnawave PATCH error for {}: {}", telegram_id, api_response.status());
-        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"}));
     }
 
     // Обновляем is_pro в БД
@@ -1411,7 +1411,7 @@ async fn get_user_squads(telegram_id: web::Path<i64>) -> HttpResponse {
 
     if !get_response.status().is_success() {
         error!("[get_user_squads] Remnawave API error for {}: {}", telegram_id, get_response.status());
-        return {  HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) });
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"}));
     }
 
     let json_response = match get_response.json::<serde_json::Value>().await {
