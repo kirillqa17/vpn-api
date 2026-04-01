@@ -271,7 +271,7 @@ pub async fn auth_email_register(
     // Generate verification code
     let code = generate_6digit_code();
     let _ = sqlx::query(
-        "INSERT INTO email_verification_codes (email, code, purpose, expires_at) VALUES ($1, $2, 'register', NOW() + INTERVAL '10 minutes')"
+        "INSERT INTO email_verification_codes (email, code, purpose, expires_at) VALUES ($1, $2, 'register', NOW() + INTERVAL '30 minutes')"
     )
     .bind(&email)
     .bind(&code)
@@ -415,7 +415,7 @@ pub async fn auth_forgot_password(
 
     let code = generate_6digit_code();
     let _ = sqlx::query(
-        "INSERT INTO email_verification_codes (email, code, purpose, expires_at) VALUES ($1, $2, 'reset_password', NOW() + INTERVAL '10 minutes')"
+        "INSERT INTO email_verification_codes (email, code, purpose, expires_at) VALUES ($1, $2, 'reset_password', NOW() + INTERVAL '30 minutes')"
     )
     .bind(&email)
     .bind(&code)
