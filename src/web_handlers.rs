@@ -1998,6 +1998,15 @@ pub async fn public_support_escalate(
     .execute(pool.get_ref())
     .await;
 
+    // Save a system message so the chat appears in admin list
+    let _ = sqlx::query(
+        "INSERT INTO support_chats (telegram_id, role, content, created_at) VALUES ($1, 'user', $2, NOW())"
+    )
+    .bind(telegram_id)
+    .bind(format!("[Анонимный пользователь запросил оператора]\nSession: {}", session_id))
+    .execute(pool.get_ref())
+    .await;
+
     info!("[public_escalate] Escalated session {} (tg_id={})", session_id, telegram_id);
     HttpResponse::Ok().json(json!({"status": "escalated"}))
 }
@@ -2642,12 +2651,14 @@ pub async fn internal_get_user_email(pool: web::Data<PgPool>, path: web::Path<i6
 pub async fn admin_list_chats(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
     if let Some(resp) = check_admin_key(&req) { return resp; }
     // Get last non-system message per user with user info
+    // For anonymous users (negative telegram_id), fall back to ticket username
     let rows = sqlx::query(
         "SELECT DISTINCT ON (sc.telegram_id) \
             sc.telegram_id, sc.role, sc.content, sc.created_at, \
-            u.username \
+            COALESCE(u.username, st.username) as username \
          FROM support_chats sc \
          LEFT JOIN users u ON u.telegram_id = sc.telegram_id \
+         LEFT JOIN support_tickets st ON st.telegram_id = sc.telegram_id \
          WHERE sc.content NOT LIKE '[SYSTEM]%' \
          ORDER BY sc.telegram_id, sc.created_at DESC"
     )
@@ -2775,19 +2786,21 @@ pub async fn admin_reply_chat(
         _ => return HttpResponse::BadRequest().json(json!({"error": "message is required and cannot be empty"})),
     };
 
-    // Verify user exists
-    let user_exists = sqlx::query("SELECT telegram_id FROM users WHERE telegram_id = $1")
-        .bind(telegram_id)
-        .fetch_optional(pool.get_ref())
-        .await;
+    // Verify user exists (skip for anonymous web users with negative IDs)
+    if telegram_id >= 0 {
+        let user_exists = sqlx::query("SELECT telegram_id FROM users WHERE telegram_id = $1")
+            .bind(telegram_id)
+            .fetch_optional(pool.get_ref())
+            .await;
 
-    match user_exists {
-        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "User not found"})),
-        Err(e) => {
-            error!("[admin_reply_chat] DB error checking user {}: {}", telegram_id, e);
-            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
+        match user_exists {
+            Ok(None) => return HttpResponse::NotFound().json(json!({"error": "User not found"})),
+            Err(e) => {
+                error!("[admin_reply_chat] DB error checking user {}: {}", telegram_id, e);
+                return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
+            }
+            _ => {}
         }
-        _ => {}
     }
 
     // Insert admin message into support_chats
