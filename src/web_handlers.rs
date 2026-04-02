@@ -3022,6 +3022,39 @@ pub async fn admin_active_tickets(pool: web::Data<PgPool>, req: HttpRequest) -> 
     }
 }
 
+// === Referral top ===
+
+pub async fn admin_referral_top(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
+
+    let rows = sqlx::query(
+        "SELECT telegram_id, username, \
+         COALESCE(array_length(referrals, 1), 0) AS total_refs, \
+         payed_refs \
+         FROM users \
+         WHERE COALESCE(array_length(referrals, 1), 0) > 0 \
+         ORDER BY total_refs DESC \
+         LIMIT 50"
+    )
+    .fetch_all(pool.get_ref())
+    .await;
+
+    match rows {
+        Ok(rows) => {
+            let list: Vec<serde_json::Value> = rows.iter().map(|r| {
+                json!({
+                    "telegram_id": r.get::<i64, _>("telegram_id"),
+                    "username": r.get::<Option<String>, _>("username").unwrap_or_default(),
+                    "total_refs": r.get::<i64, _>("total_refs"),
+                    "payed_refs": r.get::<i64, _>("payed_refs"),
+                })
+            }).collect();
+            HttpResponse::Ok().json(list)
+        }
+        Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
+    }
+}
+
 // === News ===
 
 pub async fn web_get_news(pool: web::Data<PgPool>) -> HttpResponse {

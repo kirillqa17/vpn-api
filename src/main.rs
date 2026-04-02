@@ -1629,6 +1629,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::admin_close_ticket)))
             .service(web::resource("/admin/tickets/active")
                 .route(web::get().to(web_handlers::admin_active_tickets)))
+            .service(web::resource("/admin/referral/top")
+                .route(web::get().to(web_handlers::admin_referral_top)))
     })
     .bind("0.0.0.0:8080")?
     .run()
