@@ -534,7 +534,7 @@ pub async fn auth_reset_password(
 
 // === Telegram auth from mobile app ===
 
-pub async fn auth_telegram_init(pool: web::Data<PgPool>) -> HttpResponse {
+pub async fn auth_telegram_init(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
     use rand::Rng;
     let code: String = rand::thread_rng()
         .sample_iter(&rand::distributions::Alphanumeric)
@@ -542,10 +542,14 @@ pub async fn auth_telegram_init(pool: web::Data<PgPool>) -> HttpResponse {
         .map(char::from)
         .collect();
 
+    // If user is already logged in (has JWT), save their current id for account migration
+    let initiated_by: Option<i64> = jwt::extract_telegram_id(&req).ok();
+
     let result = sqlx::query(
-        "INSERT INTO telegram_auth_codes (code, expires_at) VALUES ($1, NOW() + INTERVAL '5 minutes')"
+        "INSERT INTO telegram_auth_codes (code, expires_at, initiated_by) VALUES ($1, NOW() + INTERVAL '5 minutes', $2)"
     )
     .bind(&code)
+    .bind(initiated_by)
     .execute(pool.get_ref())
     .await;
 
@@ -565,7 +569,7 @@ pub async fn auth_telegram_check(
     let code = path.into_inner();
 
     let row = match sqlx::query(
-        "SELECT telegram_id FROM telegram_auth_codes WHERE code = $1 AND expires_at > NOW()"
+        "SELECT telegram_id, initiated_by FROM telegram_auth_codes WHERE code = $1 AND expires_at > NOW()"
     )
     .bind(&code)
     .fetch_optional(pool.get_ref())
@@ -577,6 +581,7 @@ pub async fn auth_telegram_check(
     };
 
     let tg_id: Option<i64> = row.get("telegram_id");
+    let initiated_by: Option<i64> = row.get("initiated_by");
 
     match tg_id {
         Some(id) => {
@@ -585,6 +590,35 @@ pub async fn auth_telegram_check(
                 .bind(&code)
                 .execute(pool.get_ref())
                 .await;
+
+            // If initiated by an email account (negative synthetic_id), migrate account to real telegram_id
+            if let Some(old_id) = initiated_by {
+                if old_id < 0 && old_id != id {
+                    // Check if old account exists and real tg account doesn't
+                    let old_exists = sqlx::query("SELECT telegram_id FROM users WHERE telegram_id = $1")
+                        .bind(old_id).fetch_optional(pool.get_ref()).await.ok().flatten().is_some();
+                    let new_exists = sqlx::query("SELECT telegram_id FROM users WHERE telegram_id = $1")
+                        .bind(id).fetch_optional(pool.get_ref()).await.ok().flatten().is_some();
+
+                    if old_exists && !new_exists {
+                        // Migrate: update users table from old synthetic_id to real telegram_id
+                        let _ = sqlx::query("UPDATE users SET telegram_id = $1 WHERE telegram_id = $2")
+                            .bind(id).bind(old_id).execute(pool.get_ref()).await;
+                        // Migrate credentials
+                        let _ = sqlx::query("UPDATE user_credentials SET telegram_id = $1 WHERE telegram_id = $2")
+                            .bind(id).bind(old_id).execute(pool.get_ref()).await;
+                        // Migrate support chats
+                        let _ = sqlx::query("UPDATE support_chats SET telegram_id = $1 WHERE telegram_id = $2")
+                            .bind(id).bind(old_id).execute(pool.get_ref()).await;
+                        info!("[auth_telegram_check] Migrated account {} -> {} (email user linked TG)", old_id, id);
+                    } else if old_exists && new_exists {
+                        // Both accounts exist — link email credentials to existing TG account, keep TG subscription
+                        let _ = sqlx::query("UPDATE user_credentials SET telegram_id = $1 WHERE telegram_id = $2")
+                            .bind(id).bind(old_id).execute(pool.get_ref()).await;
+                        info!("[auth_telegram_check] Linked email credentials from {} to existing TG account {}", old_id, id);
+                    }
+                }
+            }
 
             let token = match jwt::create_token(id) {
                 Ok(t) => t,
