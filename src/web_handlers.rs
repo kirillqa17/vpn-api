@@ -1727,6 +1727,16 @@ pub async fn web_support_chat(
     // 4. Build messages array for ProxyAPI
     let mut messages: Vec<serde_json::Value> = Vec::new();
     messages.push(json!({"role": "system", "content": system_prompt.as_str()}));
+    messages.push(json!({"role": "system", "content": "ВАЖНО: Пользователь пишет через сайт svoiweb.ru, а НЕ через Telegram. \
+        Правила для сайта: \
+        1) НИКОГДА не упоминайте Telegram-бота @svoivless_bot. Вместо этого говорите 'на сайте svoiweb.ru'. \
+        2) Вместо 'в боте' говорите 'на сайте' или 'в личном кабинете'. \
+        3) Оплата: 'на сайте svoiweb.ru в разделе Тарифы'. \
+        4) Установка: 'на сайте svoiweb.ru в разделе Установка'. \
+        5) Реферальная программа: 'на сайте svoiweb.ru в разделе Рефералы'. \
+        6) Настройки: 'на сайте svoiweb.ru в разделе Настройки'. \
+        7) Для связи с оператором: 'нажмите кнопку Оператор вверху чата'. \
+        8) НЕ предлагайте написать в Telegram. Пользователь УЖЕ на сайте."}));
     messages.push(json!({"role": "system", "content": user_context}));
 
     // First message: disclose AI identity
@@ -1883,6 +1893,13 @@ pub async fn public_support_chat(
     // Build messages for AI
     let mut messages: Vec<serde_json::Value> = Vec::new();
     messages.push(json!({"role": "system", "content": system_prompt.as_str()}));
+    messages.push(json!({"role": "system", "content": "ВАЖНО: Пользователь пишет через сайт svoiweb.ru, НЕ авторизован. \
+        Правила: \
+        1) НИКОГДА не упоминайте Telegram-бота. Говорите 'на сайте svoiweb.ru'. \
+        2) У анонимного пользователя нет подписки — НЕ вызывайте get_user_info. \
+        3) Для покупки: 'зарегистрируйтесь на сайте svoiweb.ru и выберите тариф'. \
+        4) Для связи с оператором: 'нажмите кнопку Оператор вверху чата'. \
+        5) НЕ предлагайте написать в Telegram. Пользователь на сайте."}));
     messages.push(json!({"role": "system", "content": user_context}));
 
     if history.is_empty() {
