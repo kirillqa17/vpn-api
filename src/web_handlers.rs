@@ -3029,7 +3029,7 @@ pub async fn admin_referral_top(pool: web::Data<PgPool>, req: HttpRequest) -> Ht
 
     let rows = sqlx::query(
         "SELECT telegram_id, username, \
-         COALESCE(array_length(referrals, 1), 0) AS total_refs, \
+         COALESCE(array_length(referrals, 1), 0)::bigint AS total_refs, \
          payed_refs \
          FROM users \
          WHERE COALESCE(array_length(referrals, 1), 0) > 0 \
