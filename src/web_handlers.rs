@@ -442,21 +442,38 @@ pub async fn auth_forgot_password(
 ) -> HttpResponse {
     let email = data.email.trim().to_lowercase();
 
-    // Always return success (don't reveal if email exists)
-    let response = json!({ "message": "Если аккаунт существует, код отправлен на email" });
-
-    let exists = sqlx::query("SELECT id FROM user_credentials WHERE email = $1 AND email_verified = TRUE")
+    // Check if email exists and is verified
+    let row = sqlx::query("SELECT email_verified FROM user_credentials WHERE email = $1")
         .bind(&email)
         .fetch_optional(pool.get_ref())
         .await;
 
-    if !matches!(exists, Ok(Some(_))) {
-        info!("[auth_forgot_password] Email not found or not verified: {}", email);
-        return HttpResponse::Ok().json(response);
+    match row {
+        Ok(None) => {
+            info!("[auth_forgot_password] Email not registered: {}", email);
+            return HttpResponse::BadRequest().json(json!({
+                "error": "Этот email не зарегистрирован. Зарегистрируйтесь на сайте или войдите через Telegram."
+            }));
+        }
+        Ok(Some(r)) => {
+            let verified: bool = r.get("email_verified");
+            if !verified {
+                info!("[auth_forgot_password] Email not verified: {}", email);
+                return HttpResponse::BadRequest().json(json!({
+                    "error": "Email не подтверждён. Войдите через Telegram и подтвердите email в настройках."
+                }));
+            }
+        }
+        Err(e) => {
+            error!("[auth_forgot_password] DB error: {}", e);
+            return HttpResponse::InternalServerError().json(json!({"error": "internal server error"}));
+        }
     }
 
     if check_rate_limit(pool.get_ref(), &email).await {
-        return HttpResponse::Ok().json(response); // Don't reveal rate limit either
+        return HttpResponse::TooManyRequests().json(json!({
+            "error": "Код уже отправлен. Подождите несколько минут перед повторной отправкой."
+        }));
     }
 
     let code = generate_6digit_code();
@@ -473,7 +490,7 @@ pub async fn auth_forgot_password(
     }
 
     info!("[auth_forgot_password] Reset code sent to {}", email);
-    HttpResponse::Ok().json(response)
+    HttpResponse::Ok().json(json!({ "message": "Код для сброса пароля отправлен на вашу почту" }))
 }
 
 pub async fn auth_reset_password(
