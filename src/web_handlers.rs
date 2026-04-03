@@ -259,10 +259,23 @@ pub async fn auth_email_register(
                 return HttpResponse::Conflict().body("Email already registered");
             }
             // Not verified — delete old unverified account so they can re-register
-            let _ = sqlx::query("DELETE FROM user_credentials WHERE email = $1 AND email_verified = FALSE")
+            // First get the telegram_id to clean up users table too
+            if let Ok(Some(old_row)) = sqlx::query("SELECT telegram_id FROM user_credentials WHERE email = $1 AND email_verified = FALSE")
                 .bind(&email)
-                .execute(pool.get_ref())
-                .await;
+                .fetch_optional(pool.get_ref())
+                .await
+            {
+                let old_tg_id: i64 = old_row.get("telegram_id");
+                let _ = sqlx::query("DELETE FROM user_credentials WHERE email = $1 AND email_verified = FALSE")
+                    .bind(&email)
+                    .execute(pool.get_ref())
+                    .await;
+                let _ = sqlx::query("DELETE FROM users WHERE telegram_id = $1")
+                    .bind(old_tg_id)
+                    .execute(pool.get_ref())
+                    .await;
+                info!("[auth_email_register] Cleaned up unverified account for {} (tg_id={})", email, old_tg_id);
+            }
         }
         Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
         _ => {}
