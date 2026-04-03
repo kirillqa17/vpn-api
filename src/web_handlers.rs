@@ -2288,7 +2288,10 @@ pub async fn internal_support_chat(
             row.get::<bool, _>("is_pro"),
             maintenance_tag,
         ),
-        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Ok(None) => format!(
+            "Контекст: пользователь не зарегистрирован (telegram_id={}). Помоги с общими вопросами и предложи зарегистрироваться через бота @svoivless_bot или на сайте svoiweb.ru{}",
+            telegram_id, maintenance_tag
+        ),
         Err(e) => {
             error!("[internal_support_chat] DB error fetching user {}: {}", telegram_id, e);
             return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
