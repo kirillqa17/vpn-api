@@ -1631,6 +1631,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::get().to(web_handlers::admin_active_tickets)))
             .service(web::resource("/admin/referral/top")
                 .route(web::get().to(web_handlers::admin_referral_top)))
+            .service(web::resource("/admin/test-email/{email}")
+                .route(web::post().to(web_handlers::admin_test_email)))
     })
     .bind("0.0.0.0:8080")?
     .run()

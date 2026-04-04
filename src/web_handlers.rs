@@ -3186,3 +3186,15 @@ pub async fn internal_save_news(pool: web::Data<PgPool>, body: web::Json<serde_j
         Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     }
 }
+
+pub async fn admin_test_email(path: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let expected = std::env::var("API_KEY").unwrap_or_default();
+    if api_key != expected { return HttpResponse::Unauthorized().json(json!({"error": "unauthorized"})); }
+
+    let email = path.into_inner();
+    match crate::email::send_test_email(&email).await {
+        Ok(_) => HttpResponse::Ok().json(json!({"status": "sent", "to": email})),
+        Err(e) => HttpResponse::InternalServerError().json(json!({"error": e})),
+    }
+}
