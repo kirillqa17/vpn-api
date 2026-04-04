@@ -80,9 +80,7 @@ fn email_template(title: &str, code: &str, message: &str, footer_note: &str) -> 
 
 <!-- Logo -->
 <tr><td style="padding:36px 40px 20px;text-align:center;">
-  <div style="display:inline-block;width:56px;height:56px;background:linear-gradient(135deg,#7C6BFF,#5B4FCF);border-radius:14px;line-height:56px;text-align:center;">
-    <span style="color:#fff;font-size:24px;font-weight:700;">S</span>
-  </div>
+  <img src="https://svoiweb.ru/icon-192.png" alt="SvoiVPN" width="56" height="56" style="border-radius:14px;display:inline-block;" />
   <div style="margin-top:12px;font-size:22px;font-weight:600;color:#ffffff;letter-spacing:1px;">SvoiVPN</div>
 </td></tr>
 
