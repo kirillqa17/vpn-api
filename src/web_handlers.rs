@@ -855,9 +855,9 @@ pub async fn internal_link_account(
     }
 
     // Get both users' subscription info
-    let tg_user = sqlx::query("SELECT subscription_end, sub_link, plan, is_active, device_limit, is_pro FROM users WHERE telegram_id = $1")
+    let tg_user = sqlx::query("SELECT uuid, subscription_end, sub_link, plan, is_active, device_limit, is_pro FROM users WHERE telegram_id = $1")
         .bind(tg_id).fetch_optional(pool.get_ref()).await.ok().flatten();
-    let email_user = sqlx::query("SELECT subscription_end, sub_link, plan, is_active, device_limit, is_pro FROM users WHERE telegram_id = $1")
+    let email_user = sqlx::query("SELECT uuid, subscription_end, sub_link, plan, is_active, device_limit, is_pro FROM users WHERE telegram_id = $1")
         .bind(email_tg_id).fetch_optional(pool.get_ref()).await.ok().flatten();
 
     // Determine which subscription is better (longer expiry)
@@ -870,8 +870,13 @@ pub async fn internal_link_account(
         _ => false,
     };
 
+    // Winner = account with longer subscription, loser = the other one
+    // After merge: winner's Remnawave user (sub_link) stays, loser's gets deleted
+    let tg_uuid: Option<uuid::Uuid> = tg_user.as_ref().and_then(|r| r.try_get("uuid").ok());
+    let email_uuid: Option<uuid::Uuid> = email_user.as_ref().and_then(|r| r.try_get("uuid").ok());
+
     if keep_email_sub {
-        // Email account has better subscription — migrate plan, sub, and settings to TG user
+        // Email account wins — take its sub_link, plan, settings; delete TG's Remnawave user
         if let Some(email_row) = &email_user {
             let email_sub_link: String = email_row.try_get("sub_link").unwrap_or_default();
             let email_plan: Option<String> = email_row.try_get("plan").ok();
@@ -879,11 +884,13 @@ pub async fn internal_link_account(
             let email_device_limit: i32 = email_row.try_get("device_limit").unwrap_or(2);
             let email_is_pro: bool = email_row.try_get("is_pro").unwrap_or(false);
 
+            // Update TG user's DB record with email account's subscription data
             let _ = sqlx::query(
-                "UPDATE users SET subscription_end = $1, sub_link = $2, plan = $3, is_active = $4, device_limit = $5, is_pro = $6 WHERE telegram_id = $7"
+                "UPDATE users SET subscription_end = $1, sub_link = $2, uuid = $3, plan = $4, is_active = $5, device_limit = $6, is_pro = $7 WHERE telegram_id = $8"
             )
             .bind(email_sub_end.unwrap())
             .bind(&email_sub_link)
+            .bind(email_uuid.unwrap())
             .bind(&email_plan)
             .bind(email_is_active)
             .bind(email_device_limit)
@@ -891,7 +898,42 @@ pub async fn internal_link_account(
             .bind(tg_id)
             .execute(pool.get_ref())
             .await;
-            info!("[internal_link_account] Migrated subscription+plan from {} to {}", email_tg_id, tg_id);
+
+            // Update winner's Remnawave user telegramId to the real TG id
+            let expire_str = email_sub_end.unwrap().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+            let _ = HTTP_CLIENT
+                .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
+                .headers(remnawave_headers())
+                .json(&json!({
+                    "uuid": email_uuid.unwrap().to_string(),
+                    "telegramId": tg_id,
+                    "status": "ACTIVE",
+                    "expireAt": expire_str
+                }))
+                .send()
+                .await;
+
+            // Delete loser's Remnawave user (TG's old one)
+            if let Some(loser_uuid) = tg_uuid {
+                let _ = HTTP_CLIENT
+                    .delete(&format!("{}/users/{}", *REMNAWAVE_API_BASE, loser_uuid))
+                    .headers(remnawave_headers())
+                    .send()
+                    .await;
+                info!("[internal_link_account] Deleted loser Remnawave user (TG) uuid={}", loser_uuid);
+            }
+
+            info!("[internal_link_account] Email wins: migrated sub+plan from {} to {}", email_tg_id, tg_id);
+        }
+    } else {
+        // TG account wins — keep its sub_link; delete email's Remnawave user
+        if let Some(loser_uuid) = email_uuid {
+            let _ = HTTP_CLIENT
+                .delete(&format!("{}/users/{}", *REMNAWAVE_API_BASE, loser_uuid))
+                .headers(remnawave_headers())
+                .send()
+                .await;
+            info!("[internal_link_account] Deleted loser Remnawave user (email) uuid={}", loser_uuid);
         }
     }
 
@@ -902,19 +944,8 @@ pub async fn internal_link_account(
         .execute(pool.get_ref())
         .await;
 
-    // Clean up old email-only user (negative synthetic ID) from users table and Remnawave
-    if email_tg_id < 0 {
-        if let Ok(Some(old_user)) = sqlx::query("SELECT uuid FROM users WHERE telegram_id = $1")
-            .bind(email_tg_id).fetch_optional(pool.get_ref()).await
-        {
-            let old_uuid: uuid::Uuid = old_user.get("uuid");
-            let _ = HTTP_CLIENT
-                .delete(&format!("{}/users/{}", *REMNAWAVE_API_BASE, old_uuid))
-                .headers(remnawave_headers())
-                .send()
-                .await;
-            info!("[internal_link_account] Deleted Remnawave user {} (uuid={})", email_tg_id, old_uuid);
-        }
+    // Clean up email user's DB record (always — their Remnawave user was already handled above)
+    if email_tg_id != tg_id {
         let _ = sqlx::query("DELETE FROM users WHERE telegram_id = $1")
             .bind(email_tg_id)
             .execute(pool.get_ref())
