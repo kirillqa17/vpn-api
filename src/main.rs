@@ -1561,6 +1561,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::internal_set_maintenance)))
             .service(web::resource("/app/maintenance")
                 .route(web::get().to(web_handlers::app_get_maintenance)))
+            .service(web::resource("/app/bug-report")
+                .route(web::post().to(web_handlers::app_bug_report)))
             // News (public)
             .service(web::resource("/web/news")
                 .route(web::get().to(web_handlers::web_get_news)))

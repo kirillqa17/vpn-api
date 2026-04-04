@@ -2874,6 +2874,54 @@ pub async fn app_get_maintenance(pool: web::Data<PgPool>) -> HttpResponse {
     }))
 }
 
+pub async fn app_bug_report(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let tg_id = body.get("telegram_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    let logs = body.get("logs").and_then(|v| v.as_str()).unwrap_or("");
+    let version = body.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+    let device = body.get("device").and_then(|v| v.as_str()).unwrap_or("?");
+    let android = body.get("android").and_then(|v| v.as_str()).unwrap_or("?");
+    let plan = body.get("plan").and_then(|v| v.as_str()).unwrap_or("?");
+
+    let report = format!(
+        "\u{1f4e9} <b>Bug Report</b>\n<b>User:</b> {}\n<b>Version:</b> {}\n<b>Device:</b> {}\n<b>Android:</b> {}\n<b>Plan:</b> {}\n\n<b>Сообщение:</b>\n{}\n\n<b>Логи:</b>\n<pre>{}</pre>",
+        tg_id, version, device, android, plan, message, &logs[..logs.len().min(2000)]
+    );
+
+    let bot_token = std::env::var("BUG_REPORT_BOT_TOKEN").unwrap_or_default();
+    let chat_id = std::env::var("BUG_REPORT_CHAT_ID").unwrap_or_else(|_| "729371813".to_string());
+
+    if bot_token.is_empty() {
+        error!("[app_bug_report] BUG_REPORT_BOT_TOKEN not set");
+        return HttpResponse::InternalServerError().json(json!({"error": "not configured"}));
+    }
+
+    let resp = HTTP_CLIENT
+        .post(&format!("https://api.telegram.org/bot{}/sendMessage", bot_token))
+        .json(&json!({
+            "chat_id": chat_id,
+            "text": &report[..report.len().min(4000)],
+            "parse_mode": "HTML"
+        }))
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            info!("[app_bug_report] Report sent from user {}", tg_id);
+            HttpResponse::Ok().json(json!({"status": "sent"}))
+        }
+        Ok(r) => {
+            error!("[app_bug_report] Telegram API error: {}", r.status());
+            HttpResponse::InternalServerError().json(json!({"error": "failed to send"}))
+        }
+        Err(e) => {
+            error!("[app_bug_report] Request failed: {}", e);
+            HttpResponse::InternalServerError().json(json!({"error": "failed to send"}))
+        }
+    }
+}
+
 pub async fn internal_set_maintenance(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>, req: HttpRequest) -> HttpResponse {
     if let Some(resp) = check_internal_key(&req) { return resp; }
     let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
