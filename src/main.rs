@@ -1550,6 +1550,8 @@ async fn main() -> std::io::Result<()> {
             // Internal auth (bot confirms Telegram login)
             .service(web::resource("/internal/auth/telegram-confirm")
                 .route(web::post().to(web_handlers::auth_telegram_confirm)))
+            .service(web::resource("/internal/link-account")
+                .route(web::post().to(web_handlers::internal_link_account)))
             // Internal support endpoints (no JWT - bot calls from Docker network)
             .service(web::resource("/internal/support/chat")
                 .route(web::post().to(web_handlers::internal_support_chat)))

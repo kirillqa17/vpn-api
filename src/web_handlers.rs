@@ -788,8 +788,140 @@ pub async fn auth_link_email(
     }
 }
 
+// === Account linking ===
+
+pub async fn internal_link_account(
+    pool: web::Data<PgPool>,
+    body: web::Json<serde_json::Value>,
+    req: HttpRequest,
+) -> HttpResponse {
+    if let Some(resp) = check_internal_key(&req) { return resp; }
+
+    let tg_id = match body.get("tg_id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => return HttpResponse::BadRequest().json(json!({"error": "tg_id required"})),
+    };
+    let email = match body.get("email").and_then(|v| v.as_str()) {
+        Some(e) => e.trim().to_lowercase(),
+        None => return HttpResponse::BadRequest().json(json!({"error": "email required"})),
+    };
+    let password = match body.get("password").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => return HttpResponse::BadRequest().json(json!({"error": "password required"})),
+    };
+
+    // Check if TG user already has linked email
+    let existing_link = sqlx::query("SELECT email FROM user_credentials WHERE telegram_id = $1 AND email_verified = TRUE")
+        .bind(tg_id)
+        .fetch_optional(pool.get_ref())
+        .await;
+    if let Ok(Some(row)) = &existing_link {
+        let linked_email: String = row.get("email");
+        return HttpResponse::Conflict().json(json!({"error": format!("Аккаунт уже привязан к {}", linked_email)}));
+    }
+
+    // Verify email credentials
+    let cred_row = match sqlx::query("SELECT telegram_id, password_hash, email_verified FROM user_credentials WHERE email = $1")
+        .bind(&email)
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::Unauthorized().json(json!({"error": "Неверный email или пароль"})),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
+    };
+
+    let email_tg_id: i64 = cred_row.get("telegram_id");
+    let stored_hash: String = cred_row.get("password_hash");
+    let verified: bool = cred_row.get("email_verified");
+
+    // Verify password
+    use argon2::{Argon2, PasswordVerifier};
+    use argon2::password_hash::PasswordHash;
+    let parsed_hash = match PasswordHash::new(&stored_hash) {
+        Ok(h) => h,
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"error": "internal server error"})),
+    };
+    if Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_err() {
+        return HttpResponse::Unauthorized().json(json!({"error": "Неверный email или пароль"}));
+    }
+    if !verified {
+        return HttpResponse::BadRequest().json(json!({"error": "Email не подтверждён. Сначала подтвердите email на сайте."}));
+    }
+
+    // If email is already linked to this same TG user
+    if email_tg_id == tg_id {
+        return HttpResponse::Ok().json(json!({"status": "already_linked", "email": email}));
+    }
+
+    // Get both users' subscription info
+    let tg_user = sqlx::query("SELECT subscription_end, sub_link FROM users WHERE telegram_id = $1")
+        .bind(tg_id).fetch_optional(pool.get_ref()).await.ok().flatten();
+    let email_user = sqlx::query("SELECT subscription_end, sub_link FROM users WHERE telegram_id = $1")
+        .bind(email_tg_id).fetch_optional(pool.get_ref()).await.ok().flatten();
+
+    // Determine which subscription is better (longer expiry)
+    let tg_sub_end: Option<chrono::DateTime<chrono::Utc>> = tg_user.as_ref().and_then(|r| r.try_get("subscription_end").ok());
+    let email_sub_end: Option<chrono::DateTime<chrono::Utc>> = email_user.as_ref().and_then(|r| r.try_get("subscription_end").ok());
+
+    let keep_email_sub = match (tg_sub_end, email_sub_end) {
+        (Some(tg), Some(em)) => em > tg,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+
+    if keep_email_sub {
+        // Email account has better subscription — migrate it to TG user
+        if let Some(email_row) = &email_user {
+            let email_sub_link: String = email_row.try_get("sub_link").unwrap_or_default();
+            // Update TG user's subscription from email account
+            let _ = sqlx::query(
+                "UPDATE users SET subscription_end = $1, sub_link = $2 WHERE telegram_id = $3"
+            )
+            .bind(email_sub_end.unwrap())
+            .bind(&email_sub_link)
+            .bind(tg_id)
+            .execute(pool.get_ref())
+            .await;
+            info!("[internal_link_account] Migrated subscription from {} to {}", email_tg_id, tg_id);
+        }
+    }
+
+    // Move email credentials to TG account
+    let _ = sqlx::query("UPDATE user_credentials SET telegram_id = $1 WHERE email = $2")
+        .bind(tg_id)
+        .bind(&email)
+        .execute(pool.get_ref())
+        .await;
+
+    // Clean up old email-only user (negative synthetic ID) from users table and Remnawave
+    if email_tg_id < 0 {
+        if let Ok(Some(old_user)) = sqlx::query("SELECT uuid FROM users WHERE telegram_id = $1")
+            .bind(email_tg_id).fetch_optional(pool.get_ref()).await
+        {
+            let old_uuid: uuid::Uuid = old_user.get("uuid");
+            let _ = HTTP_CLIENT
+                .delete(&format!("{}/users/{}", *REMNAWAVE_API_BASE, old_uuid))
+                .headers(remnawave_headers())
+                .send()
+                .await;
+            info!("[internal_link_account] Deleted Remnawave user {} (uuid={})", email_tg_id, old_uuid);
+        }
+        let _ = sqlx::query("DELETE FROM users WHERE telegram_id = $1")
+            .bind(email_tg_id)
+            .execute(pool.get_ref())
+            .await;
+    }
+
+    info!("[internal_link_account] Linked email {} to TG user {} (was {})", email, tg_id, email_tg_id);
+    HttpResponse::Ok().json(json!({
+        "status": "linked",
+        "email": email,
+        "subscription_migrated": keep_email_sub
+    }))
+}
+
 // === User info ===
-// NOTE: merge endpoints removed (auth_merge_email_account, link_code, merge_by_code)
 
 pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
     let telegram_id = match jwt::extract_telegram_id(&req) {
