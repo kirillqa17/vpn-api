@@ -175,7 +175,7 @@ pub async fn auth_telegram(
 
     let token = match jwt::create_token(telegram_id) {
         Ok(t) => t,
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to create token"),
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"error": "Ошибка авторизации. Попробуйте позже."})),
     };
 
     HttpResponse::Ok().json(json!({ "token": token, "telegram_id": telegram_id }))
@@ -240,10 +240,10 @@ pub async fn auth_email_register(
     let password = &data.password;
 
     if !email.contains('@') || email.len() < 5 {
-        return HttpResponse::BadRequest().body("Invalid email");
+        return HttpResponse::BadRequest().json(json!({"error": "Введите корректный email адрес"}));
     }
     if password.len() < 6 {
-        return HttpResponse::BadRequest().body("Password must be at least 6 characters");
+        return HttpResponse::BadRequest().json(json!({"error": "Пароль должен быть не менее 6 символов"}));
     }
 
     // Check if email already taken and verified
@@ -256,7 +256,7 @@ pub async fn auth_email_register(
         Ok(Some(row)) => {
             let verified: bool = row.get("email_verified");
             if verified {
-                return HttpResponse::Conflict().body("Email already registered");
+                return HttpResponse::Conflict().json(json!({"error": "Аккаунт с этим email уже зарегистрирован. Войдите или восстановите пароль."}));
             }
             // Not verified — delete old unverified account so they can re-register
             // First get the telegram_id to clean up users table too
@@ -283,7 +283,7 @@ pub async fn auth_email_register(
 
     // Rate limit
     if check_rate_limit(pool.get_ref(), &email).await {
-        return HttpResponse::TooManyRequests().body("Please wait 60 seconds before requesting a new code");
+        return HttpResponse::TooManyRequests().json(json!({"error": "Код уже отправлен. Подождите 60 секунд перед повторной отправкой."}));
     }
 
     // Generate synthetic negative telegram_id
@@ -303,7 +303,7 @@ pub async fn auth_email_register(
     let salt = SaltString::generate(&mut OsRng);
     let password_hash = match Argon2::default().hash_password(password.as_bytes(), &salt) {
         Ok(h) => h.to_string(),
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to hash password"),
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"error": "Ошибка при создании аккаунта. Попробуйте позже."})),
     };
 
     // Create user in Remnawave + DB (sanitize email for Remnawave username)
@@ -324,7 +324,7 @@ pub async fn auth_email_register(
 
     if let Err(e) = result {
         error!("[auth_email_register] Failed to save credentials: {}", e);
-        return HttpResponse::InternalServerError().body("Failed to save credentials");
+        return HttpResponse::InternalServerError().json(json!({"error": "Ошибка при сохранении данных. Попробуйте позже."}));
     }
 
     // Generate verification code
@@ -340,7 +340,7 @@ pub async fn auth_email_register(
     // Send email
     if let Err(e) = crate::email::send_verification_code(&email, &code).await {
         error!("[auth_email_register] Failed to send verification email: {}", e);
-        return HttpResponse::InternalServerError().body("Failed to send verification email");
+        return HttpResponse::InternalServerError().json(json!({"error": "Не удалось отправить код на email. Проверьте адрес и попробуйте позже."}));
     }
 
     info!("[auth_email_register] Verification code sent to {} (id={})", email, synthetic_id);
@@ -389,14 +389,14 @@ pub async fn auth_verify_email(
         .await
     {
         Ok(Some(r)) => r,
-        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "Пользователь не найден"})),
         Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
     let telegram_id: i64 = cred_row.get("telegram_id");
     let token = match jwt::create_token(telegram_id) {
         Ok(t) => t,
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to create token"),
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"error": "Ошибка авторизации. Попробуйте позже."})),
     };
 
     info!("[auth_verify_email] Email verified: {} (id={})", email, telegram_id);
@@ -415,7 +415,7 @@ pub async fn auth_email_login(
         .await
     {
         Ok(Some(r)) => r,
-        Ok(None) => return HttpResponse::Unauthorized().body("Invalid email or password"),
+        Ok(None) => return HttpResponse::Unauthorized().json(json!({"error": "Неверный email или пароль"})),
         Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
@@ -429,11 +429,11 @@ pub async fn auth_email_login(
 
     let parsed_hash = match PasswordHash::new(&stored_hash) {
         Ok(h) => h,
-        Err(_) => return HttpResponse::InternalServerError().body("Invalid stored hash"),
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"error": "Ошибка авторизации. Попробуйте позже."})),
     };
 
     if Argon2::default().verify_password(data.password.as_bytes(), &parsed_hash).is_err() {
-        return HttpResponse::Unauthorized().body("Invalid email or password");
+        return HttpResponse::Unauthorized().json(json!({"error": "Неверный email или пароль"}));
     }
 
     if !verified {
@@ -442,7 +442,7 @@ pub async fn auth_email_login(
 
     let token = match jwt::create_token(telegram_id) {
         Ok(t) => t,
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to create token"),
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"error": "Ошибка авторизации. Попробуйте позже."})),
     };
 
     info!("[auth_email_login] Email login: {} (id={})", email, telegram_id);
@@ -515,7 +515,7 @@ pub async fn auth_reset_password(
     let new_password = &data.new_password;
 
     if new_password.len() < 6 {
-        return HttpResponse::BadRequest().body("Password must be at least 6 characters");
+        return HttpResponse::BadRequest().json(json!({"error": "Пароль должен быть не менее 6 символов"}));
     }
 
     // Find valid code
@@ -542,7 +542,7 @@ pub async fn auth_reset_password(
     let salt = SaltString::generate(&mut OsRng);
     let password_hash = match Argon2::default().hash_password(new_password.as_bytes(), &salt) {
         Ok(h) => h.to_string(),
-        Err(_) => return HttpResponse::InternalServerError().body("Failed to hash password"),
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"error": "Ошибка при смене пароля. Попробуйте позже."})),
     };
 
     // Update password
@@ -652,7 +652,7 @@ pub async fn auth_telegram_check(
 
             let token = match jwt::create_token(id) {
                 Ok(t) => t,
-                Err(_) => return HttpResponse::InternalServerError().body("Failed to create token"),
+                Err(_) => return HttpResponse::InternalServerError().json(json!({"error": "Ошибка авторизации. Попробуйте позже."})),
             };
 
             info!("[auth_telegram_check] Auth confirmed for tg_id={}", id);
@@ -1001,7 +1001,7 @@ pub async fn web_activate_trial(pool: web::Data<PgPool>, req: HttpRequest) -> Ht
 
     let row = match user {
         Ok(Some(r)) => r,
-        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "Пользователь не найден"})),
         Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
@@ -1535,7 +1535,7 @@ pub async fn web_toggle_pro(
 
     let row = match user {
         Ok(Some(r)) => r,
-        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "Пользователь не найден"})),
         Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
     };
 
@@ -1748,7 +1748,7 @@ pub async fn web_support_chat(
             row.get::<i64, _>("device_limit"),
             row.get::<bool, _>("is_pro"),
         ),
-        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "Пользователь не найден"})),
         Err(e) => {
             error!("[support_chat] DB error fetching user {}: {}", telegram_id, e);
             return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
@@ -2094,7 +2094,7 @@ pub async fn web_support_escalate(
 
     let user_row = match user_row {
         Ok(Some(row)) => row,
-        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "Пользователь не найден"})),
         Err(e) => {
             error!("[support_escalate] DB error fetching user {}: {}", telegram_id, e);
             return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
@@ -2553,7 +2553,7 @@ pub async fn internal_support_escalate(
 
     let user_row = match user_row {
         Ok(Some(row)) => row,
-        Ok(None) => return HttpResponse::NotFound().body("User not found"),
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "Пользователь не найден"})),
         Err(e) => {
             error!("[internal_support_escalate] DB error fetching user {}: {}", telegram_id, e);
             return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) };
