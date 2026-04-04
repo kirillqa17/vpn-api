@@ -855,9 +855,9 @@ pub async fn internal_link_account(
     }
 
     // Get both users' subscription info
-    let tg_user = sqlx::query("SELECT subscription_end, sub_link FROM users WHERE telegram_id = $1")
+    let tg_user = sqlx::query("SELECT subscription_end, sub_link, plan, is_active, device_limit, is_pro FROM users WHERE telegram_id = $1")
         .bind(tg_id).fetch_optional(pool.get_ref()).await.ok().flatten();
-    let email_user = sqlx::query("SELECT subscription_end, sub_link FROM users WHERE telegram_id = $1")
+    let email_user = sqlx::query("SELECT subscription_end, sub_link, plan, is_active, device_limit, is_pro FROM users WHERE telegram_id = $1")
         .bind(email_tg_id).fetch_optional(pool.get_ref()).await.ok().flatten();
 
     // Determine which subscription is better (longer expiry)
@@ -871,19 +871,27 @@ pub async fn internal_link_account(
     };
 
     if keep_email_sub {
-        // Email account has better subscription — migrate it to TG user
+        // Email account has better subscription — migrate plan, sub, and settings to TG user
         if let Some(email_row) = &email_user {
             let email_sub_link: String = email_row.try_get("sub_link").unwrap_or_default();
-            // Update TG user's subscription from email account
+            let email_plan: Option<String> = email_row.try_get("plan").ok();
+            let email_is_active: i32 = email_row.try_get("is_active").unwrap_or(0);
+            let email_device_limit: i32 = email_row.try_get("device_limit").unwrap_or(2);
+            let email_is_pro: bool = email_row.try_get("is_pro").unwrap_or(false);
+
             let _ = sqlx::query(
-                "UPDATE users SET subscription_end = $1, sub_link = $2 WHERE telegram_id = $3"
+                "UPDATE users SET subscription_end = $1, sub_link = $2, plan = $3, is_active = $4, device_limit = $5, is_pro = $6 WHERE telegram_id = $7"
             )
             .bind(email_sub_end.unwrap())
             .bind(&email_sub_link)
+            .bind(&email_plan)
+            .bind(email_is_active)
+            .bind(email_device_limit)
+            .bind(email_is_pro)
             .bind(tg_id)
             .execute(pool.get_ref())
             .await;
-            info!("[internal_link_account] Migrated subscription from {} to {}", email_tg_id, tg_id);
+            info!("[internal_link_account] Migrated subscription+plan from {} to {}", email_tg_id, tg_id);
         }
     }
 
