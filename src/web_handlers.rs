@@ -102,7 +102,10 @@ async fn auto_register_user(pool: &PgPool, telegram_id: i64, username: Option<St
         let status = api_response.status();
         let body = api_response.text().await.unwrap_or_default();
         error!("[auto_register] Remnawave error for {} ({}): {}", telegram_id, status, body);
-        return Err(HttpResponse::InternalServerError().json(json!({"error": "internal server error"})));
+        if body.contains("already exists") {
+            return Err(HttpResponse::Conflict().json(json!({"error": "Ошибка регистрации. Попробуйте снова через минуту."})));
+        }
+        return Err(HttpResponse::InternalServerError().json(json!({"error": "Ошибка при создании аккаунта. Попробуйте позже."})));
     }
 
     let json_response: serde_json::Value = api_response.json().await.map_err(|e| {
@@ -259,13 +262,23 @@ pub async fn auth_email_register(
                 return HttpResponse::Conflict().json(json!({"error": "Аккаунт с этим email уже зарегистрирован. Войдите или восстановите пароль."}));
             }
             // Not verified — delete old unverified account so they can re-register
-            // First get the telegram_id to clean up users table too
-            if let Ok(Some(old_row)) = sqlx::query("SELECT telegram_id FROM user_credentials WHERE email = $1 AND email_verified = FALSE")
+            // Clean up from user_credentials, users table, AND Remnawave
+            if let Ok(Some(old_row)) = sqlx::query("SELECT telegram_id, uuid FROM user_credentials uc JOIN users u ON uc.telegram_id = u.telegram_id WHERE uc.email = $1 AND uc.email_verified = FALSE")
                 .bind(&email)
                 .fetch_optional(pool.get_ref())
                 .await
             {
                 let old_tg_id: i64 = old_row.get("telegram_id");
+                let old_uuid: uuid::Uuid = old_row.get("uuid");
+
+                // Delete from Remnawave
+                let _ = HTTP_CLIENT
+                    .delete(&format!("{}/users/{}", *REMNAWAVE_API_BASE, old_uuid))
+                    .headers(remnawave_headers())
+                    .send()
+                    .await;
+                info!("[auth_email_register] Deleted Remnawave user {} (uuid={})", old_tg_id, old_uuid);
+
                 let _ = sqlx::query("DELETE FROM user_credentials WHERE email = $1 AND email_verified = FALSE")
                     .bind(&email)
                     .execute(pool.get_ref())
@@ -275,6 +288,16 @@ pub async fn auth_email_register(
                     .execute(pool.get_ref())
                     .await;
                 info!("[auth_email_register] Cleaned up unverified account for {} (tg_id={})", email, old_tg_id);
+            } else if let Ok(Some(_)) = sqlx::query("SELECT telegram_id FROM user_credentials WHERE email = $1 AND email_verified = FALSE")
+                .bind(&email)
+                .fetch_optional(pool.get_ref())
+                .await
+            {
+                // Fallback: no users row (maybe failed earlier), just clean credentials
+                let _ = sqlx::query("DELETE FROM user_credentials WHERE email = $1 AND email_verified = FALSE")
+                    .bind(&email)
+                    .execute(pool.get_ref())
+                    .await;
             }
         }
         Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
