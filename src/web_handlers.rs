@@ -2938,6 +2938,70 @@ pub async fn internal_set_maintenance(pool: web::Data<PgPool>, body: web::Json<s
     HttpResponse::Ok().json(json!({"maintenance": enabled}))
 }
 
+pub async fn internal_send_verify_code(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_internal_key(&req) { return resp; }
+    let email = match body.get("email").and_then(|v| v.as_str()) {
+        Some(e) => e.trim().to_lowercase(),
+        None => return HttpResponse::BadRequest().json(json!({"error": "email required"})),
+    };
+
+    // Check email exists and is not verified
+    let row = sqlx::query("SELECT email_verified FROM user_credentials WHERE email = $1")
+        .bind(&email).fetch_optional(pool.get_ref()).await;
+    match row {
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "Email не зарегистрирован"})),
+        Ok(Some(r)) => {
+            let verified: bool = r.get("email_verified");
+            if verified { return HttpResponse::Ok().json(json!({"status": "already_verified"})); }
+        }
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
+    }
+
+    if check_rate_limit(pool.get_ref(), &email).await {
+        return HttpResponse::TooManyRequests().json(json!({"error": "Код уже отправлен. Подождите 60 секунд."}));
+    }
+
+    let code = generate_6digit_code();
+    let _ = sqlx::query(
+        "INSERT INTO email_verification_codes (email, code, purpose, expires_at) VALUES ($1, $2, 'register', NOW() + INTERVAL '30 minutes')"
+    ).bind(&email).bind(&code).execute(pool.get_ref()).await;
+
+    if let Err(e) = crate::email::send_verification_code(&email, &code).await {
+        error!("[internal_send_verify_code] Failed to send: {}", e);
+        return HttpResponse::InternalServerError().json(json!({"error": "Не удалось отправить код"}));
+    }
+
+    info!("[internal_send_verify_code] Code sent to {}", email);
+    HttpResponse::Ok().json(json!({"status": "sent"}))
+}
+
+pub async fn internal_confirm_verify_code(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_internal_key(&req) { return resp; }
+    let email = match body.get("email").and_then(|v| v.as_str()) {
+        Some(e) => e.trim().to_lowercase(),
+        None => return HttpResponse::BadRequest().json(json!({"error": "email required"})),
+    };
+    let code = match body.get("code").and_then(|v| v.as_str()) {
+        Some(c) => c.trim(),
+        None => return HttpResponse::BadRequest().json(json!({"error": "code required"})),
+    };
+
+    let row = match sqlx::query(
+        "SELECT id FROM email_verification_codes WHERE email = $1 AND code = $2 AND purpose = 'register' AND used = FALSE AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1"
+    ).bind(&email).bind(code).fetch_optional(pool.get_ref()).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::BadRequest().json(json!({"error": "Неверный или просроченный код"})),
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
+    };
+
+    let code_id: i64 = row.get("id");
+    let _ = sqlx::query("UPDATE email_verification_codes SET used = TRUE WHERE id = $1").bind(code_id).execute(pool.get_ref()).await;
+    let _ = sqlx::query("UPDATE user_credentials SET email_verified = TRUE WHERE email = $1").bind(&email).execute(pool.get_ref()).await;
+
+    info!("[internal_confirm_verify_code] Email {} verified via bot", email);
+    HttpResponse::Ok().json(json!({"status": "verified"}))
+}
+
 pub async fn internal_get_user_email(pool: web::Data<PgPool>, path: web::Path<i64>, req: HttpRequest) -> HttpResponse {
     if let Some(resp) = check_internal_key(&req) { return resp; }
     let tg_id = path.into_inner();
