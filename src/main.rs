@@ -172,12 +172,31 @@ async fn extend_subscription(
     telegram_id: web::Path<i64>,
     request: web::Json<ExtendSubscriptionRequest>,
 ) -> HttpResponse {
-    let telegram_id = telegram_id.into_inner();
+    let mut telegram_id = telegram_id.into_inner();
     let days = request.days;
     let plan = request.plan.clone();
     info!("[extend_subscription] telegram_id={}, days={}, plan={}", telegram_id, days, plan);
 
-    // Check if user exists locally; if not, try to import from Remnawave
+    // Check if user exists locally; if not found, try negative ID (email users)
+    let user_exists = sqlx::query("SELECT 1 FROM users WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await
+        .unwrap_or(None);
+
+    if user_exists.is_none() && telegram_id > 0 {
+        let neg_id = -telegram_id;
+        let neg_exists = sqlx::query("SELECT 1 FROM users WHERE telegram_id = $1")
+            .bind(neg_id)
+            .fetch_optional(pool.get_ref())
+            .await
+            .unwrap_or(None);
+        if neg_exists.is_some() {
+            info!("[extend_subscription] User {} not found, but -{} exists (email user). Using negative ID.", telegram_id, telegram_id);
+            telegram_id = neg_id;
+        }
+    }
+
     let user_exists = sqlx::query("SELECT 1 FROM users WHERE telegram_id = $1")
         .bind(telegram_id)
         .fetch_optional(pool.get_ref())
@@ -513,19 +532,34 @@ async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>)
 }
 
 async fn get_user_info(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> HttpResponse {
-    let telegram_id = telegram_id.into_inner();
+    let mut telegram_id = telegram_id.into_inner();
 
+    // Try negative ID for email users (e.g. 1000242 -> -1000242)
     let result = sqlx::query_as!(
         User,
-        r#"
-        SELECT * FROM users WHERE telegram_id = $1
-        "#,
+        r#"SELECT * FROM users WHERE telegram_id = $1"#,
         telegram_id
     )
     .fetch_one(pool.get_ref())
     .await;
 
     match result {
+        Ok(user) => return HttpResponse::Ok().json(user),
+        Err(_) if telegram_id > 0 => {
+            telegram_id = -telegram_id;
+        }
+        Err(_) => return HttpResponse::NotFound().body("User not found"),
+    }
+
+    // Retry with negative ID
+    match sqlx::query_as!(
+        User,
+        r#"SELECT * FROM users WHERE telegram_id = $1"#,
+        telegram_id
+    )
+    .fetch_one(pool.get_ref())
+    .await
+    {
         Ok(user) => HttpResponse::Ok().json(user),
         Err(_) => HttpResponse::NotFound().body("User not found"),
     }
@@ -1336,7 +1370,7 @@ async fn toggle_pro(
     telegram_id: web::Path<i64>,
     data: web::Json<ToggleProRequest>,
 ) -> HttpResponse {
-    let telegram_id = telegram_id.into_inner();
+    let mut telegram_id = telegram_id.into_inner();
     let enable = data.is_pro;
     let pro_squad = "b6a4e86b-b769-4c86-a2d9-f31bbe645029";
     info!("[toggle_pro] telegram_id={}, enable={}", telegram_id, enable);
@@ -1349,6 +1383,18 @@ async fn toggle_pro(
     .fetch_one(pool.get_ref())
     .await {
         Ok(user) => user,
+        Err(_) if telegram_id > 0 => {
+            // Try negative ID for email users
+            telegram_id = -telegram_id;
+            match sqlx::query_as!(User, "SELECT * FROM users WHERE telegram_id = $1", telegram_id)
+                .fetch_one(pool.get_ref()).await {
+                Ok(user) => user,
+                Err(_) => {
+                    warn!("[toggle_pro] User {} not found", -telegram_id);
+                    return HttpResponse::NotFound().body("User not found");
+                }
+            }
+        }
         Err(_) => {
             warn!("[toggle_pro] User {} not found", telegram_id);
             return HttpResponse::NotFound().body("User not found");
