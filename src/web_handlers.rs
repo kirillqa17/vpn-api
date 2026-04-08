@@ -2031,12 +2031,33 @@ pub async fn web_support_chat(
 
     let ai_response = match api_result {
         Err(e) => {
-            error!("[support_chat] ProxyAPI call failed: {}", e);
-            return HttpResponse::ServiceUnavailable().body("service temporarily unavailable");
+            warn!("[support_chat] ProxyAPI call failed: {}, retrying...", e);
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            match HTTP_CLIENT.post(format!("{}/chat/completions", *PROXYAPI_BASE_URL))
+                .header("Authorization", format!("Bearer {}", *PROXYAPI_KEY))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({"model":"gemini/gemini-2.0-flash","temperature":0.3,"messages":messages}))
+                .send().await {
+                Ok(resp) if resp.status().is_success() => resp.json::<serde_json::Value>().await
+                    .map(|v| v["choices"][0]["message"]["content"].as_str().unwrap_or("Извините, не удалось получить ответ.").to_string())
+                    .unwrap_or_else(|_| { return "Извините, не удалось получить ответ.".to_string() }),
+                _ => { error!("[support_chat] ProxyAPI retry also failed"); return HttpResponse::ServiceUnavailable().body("service temporarily unavailable"); }
+            }
         }
         Ok(resp) if !resp.status().is_success() => {
-            error!("[support_chat] ProxyAPI error: {}", resp.status());
-            return HttpResponse::ServiceUnavailable().body("service temporarily unavailable");
+            let status = resp.status();
+            warn!("[support_chat] ProxyAPI error: {}, retrying...", status);
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            match HTTP_CLIENT.post(format!("{}/chat/completions", *PROXYAPI_BASE_URL))
+                .header("Authorization", format!("Bearer {}", *PROXYAPI_KEY))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({"model":"gemini/gemini-2.0-flash","temperature":0.3,"messages":messages}))
+                .send().await {
+                Ok(resp) if resp.status().is_success() => resp.json::<serde_json::Value>().await
+                    .map(|v| v["choices"][0]["message"]["content"].as_str().unwrap_or("Извините, не удалось получить ответ.").to_string())
+                    .unwrap_or_else(|_| { return "Извините, не удалось получить ответ.".to_string() }),
+                _ => { error!("[support_chat] ProxyAPI retry also failed"); return HttpResponse::ServiceUnavailable().body("service temporarily unavailable"); }
+            }
         }
         Ok(resp) => match resp.json::<serde_json::Value>().await {
             Ok(v) => v["choices"][0]["message"]["content"]
@@ -2586,12 +2607,43 @@ pub async fn internal_support_chat(
 
         let resp_json = match api_result {
             Err(e) => {
-                error!("[internal_support_chat] ProxyAPI call failed (iteration {}): {}", iteration, e);
-                return HttpResponse::ServiceUnavailable().body("service temporarily unavailable");
+                warn!("[internal_support_chat] ProxyAPI call failed (iteration {}): {}, retrying...", iteration, e);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let retry = HTTP_CLIENT
+                    .post(format!("{}/chat/completions", *PROXYAPI_BASE_URL))
+                    .header("Authorization", format!("Bearer {}", *PROXYAPI_KEY))
+                    .header("Content-Type", "application/json")
+                    .json(&request_body)
+                    .send()
+                    .await;
+                match retry {
+                    Err(e2) => { error!("[internal_support_chat] ProxyAPI retry failed (iteration {}): {}", iteration, e2); return HttpResponse::ServiceUnavailable().body("service temporarily unavailable"); }
+                    Ok(resp) if !resp.status().is_success() => { error!("[internal_support_chat] ProxyAPI retry error (iteration {}): {}", iteration, resp.status()); return HttpResponse::ServiceUnavailable().body("service temporarily unavailable"); }
+                    Ok(resp) => match resp.json::<serde_json::Value>().await {
+                        Ok(v) => v,
+                        Err(e2) => { error!("[internal_support_chat] ProxyAPI retry parse error: {}", e2); return HttpResponse::ServiceUnavailable().body("service temporarily unavailable"); }
+                    }
+                }
             }
             Ok(resp) if !resp.status().is_success() => {
-                error!("[internal_support_chat] ProxyAPI error (iteration {}): {}", iteration, resp.status());
-                return HttpResponse::ServiceUnavailable().body("service temporarily unavailable");
+                let status = resp.status();
+                warn!("[internal_support_chat] ProxyAPI error (iteration {}): {}, retrying...", iteration, status);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let retry = HTTP_CLIENT
+                    .post(format!("{}/chat/completions", *PROXYAPI_BASE_URL))
+                    .header("Authorization", format!("Bearer {}", *PROXYAPI_KEY))
+                    .header("Content-Type", "application/json")
+                    .json(&request_body)
+                    .send()
+                    .await;
+                match retry {
+                    Err(e) => { error!("[internal_support_chat] ProxyAPI retry failed (iteration {}): {}", iteration, e); return HttpResponse::ServiceUnavailable().body("service temporarily unavailable"); }
+                    Ok(resp) if !resp.status().is_success() => { error!("[internal_support_chat] ProxyAPI retry error (iteration {}): {}", iteration, resp.status()); return HttpResponse::ServiceUnavailable().body("service temporarily unavailable"); }
+                    Ok(resp) => match resp.json::<serde_json::Value>().await {
+                        Ok(v) => v,
+                        Err(e) => { error!("[internal_support_chat] ProxyAPI retry parse error: {}", e); return HttpResponse::ServiceUnavailable().body("service temporarily unavailable"); }
+                    }
+                }
             }
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(v) => v,
