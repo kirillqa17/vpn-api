@@ -186,8 +186,80 @@ async fn extend_subscription(
     {
         Ok(record) => record,
         Err(_) => {
-            warn!("[extend_subscription] User {} not found", telegram_id);
-            return HttpResponse::NotFound().body("User not found");
+            // User not in local DB — try to import from Remnawave
+            info!("[extend_subscription] User {} not in local DB, checking Remnawave...", telegram_id);
+            let remna_resp = match HTTP_CLIENT
+                .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
+                .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
+                .header("Content-Type", "application/json")
+                .header("X-Forwarded-For", "127.0.0.1")
+                .header("X-Forwarded-Proto", "https")
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+                    Ok(json) => json,
+                    Err(_) => {
+                        warn!("[extend_subscription] User {} not found in Remnawave (parse error)", telegram_id);
+                        return HttpResponse::NotFound().body("User not found");
+                    }
+                },
+                _ => {
+                    warn!("[extend_subscription] User {} not found in Remnawave", telegram_id);
+                    return HttpResponse::NotFound().body("User not found");
+                }
+            };
+
+            let remna_user = &remna_resp["response"][0];
+            let uuid_str = match remna_user["uuid"].as_str() {
+                Some(u) => u,
+                None => {
+                    warn!("[extend_subscription] User {} not found in Remnawave (no uuid)", telegram_id);
+                    return HttpResponse::NotFound().body("User not found");
+                }
+            };
+            let uuid = match Uuid::parse_str(uuid_str) {
+                Ok(u) => u,
+                Err(_) => return HttpResponse::InternalServerError().body("Invalid uuid from Remnawave"),
+            };
+            let sub_url = remna_user["subscriptionUrl"].as_str().unwrap_or("").to_string();
+            let username = remna_user["username"].as_str().map(|s| s.to_string());
+
+            info!("[extend_subscription] Importing user {} from Remnawave (uuid={})", telegram_id, uuid);
+            match sqlx::query!(
+                r#"
+                INSERT INTO users (telegram_id, uuid, subscription_end, is_active, created_at, is_used_trial, game_points, is_used_ref_bonus, game_attempts, username, sub_link, payed_refs, is_pro)
+                VALUES ($1, $2, NOW(), 0, NOW(), false, 0, false, 0, $3, $4, 0, false)
+                "#,
+                telegram_id,
+                uuid,
+                username.as_deref(),
+                sub_url
+            )
+            .execute(pool.get_ref())
+            .await
+            {
+                Ok(_) => info!("[extend_subscription] User {} imported to local DB", telegram_id),
+                Err(e) => {
+                    error!("[extend_subscription] Failed to import user {} to local DB: {}", telegram_id, e);
+                    return HttpResponse::InternalServerError().body("Failed to import user");
+                }
+            }
+
+            // Re-fetch the newly created local record
+            match sqlx::query!(
+                "SELECT * FROM users WHERE telegram_id = $1",
+                telegram_id
+            )
+            .fetch_one(pool.get_ref())
+            .await
+            {
+                Ok(record) => record,
+                Err(e) => {
+                    error!("[extend_subscription] Failed to re-fetch imported user {}: {}", telegram_id, e);
+                    return HttpResponse::InternalServerError().body("Failed to re-fetch user");
+                }
+            }
         }
     };
 
