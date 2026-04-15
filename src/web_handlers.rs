@@ -3814,6 +3814,66 @@ pub async fn admin_test_email(path: web::Path<String>, req: HttpRequest) -> Http
     }
 }
 
+/// POST /internal/payments — append-only ledger of every subscription extension event.
+/// Body: { telegram_id, source, amount_rub?, plan, duration?, days_added, external_id?, metadata? }
+/// Fire-and-forget — callers should not depend on this succeeding.
+pub async fn internal_log_payment(
+    pool: web::Data<PgPool>,
+    body: web::Json<serde_json::Value>,
+    req: HttpRequest,
+) -> HttpResponse {
+    if let Some(resp) = check_internal_key(&req) { return resp; }
+
+    let telegram_id = match body.get("telegram_id").and_then(|v| v.as_i64()) {
+        Some(t) => t,
+        None => return HttpResponse::BadRequest().json(json!({"error": "telegram_id required"})),
+    };
+    let source = match body.get("source").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return HttpResponse::BadRequest().json(json!({"error": "source required"})),
+    };
+    let plan = match body.get("plan").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => return HttpResponse::BadRequest().json(json!({"error": "plan required"})),
+    };
+    let days_added = match body.get("days_added").and_then(|v| v.as_i64()) {
+        Some(d) => d as i32,
+        None => return HttpResponse::BadRequest().json(json!({"error": "days_added required"})),
+    };
+
+    let amount_rub = body.get("amount_rub").and_then(|v| v.as_f64());
+    let duration = body.get("duration").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let external_id = body.get("external_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let metadata = body.get("metadata").cloned();
+
+    let result = sqlx::query(
+        "INSERT INTO payments (telegram_id, source, amount_rub, plan, duration, days_added, external_id, metadata) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id"
+    )
+    .bind(telegram_id)
+    .bind(&source)
+    .bind(amount_rub)
+    .bind(&plan)
+    .bind(duration.as_deref())
+    .bind(days_added)
+    .bind(external_id.as_deref())
+    .bind(metadata)
+    .fetch_one(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(row) => {
+            let id: i64 = row.get("id");
+            info!("[payments] logged id={} tg={} source={} days={}", id, telegram_id, source, days_added);
+            HttpResponse::Ok().json(json!({"status": "ok", "id": id}))
+        }
+        Err(e) => {
+            error!("[payments] INSERT error: {}", e);
+            HttpResponse::InternalServerError().json(json!({"error": "insert failed"}))
+        }
+    }
+}
+
 /// GET /web/me/notifications — current email notification preferences (JWT)
 pub async fn web_get_notifications(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
     let telegram_id = match jwt::extract_telegram_id(&req) {

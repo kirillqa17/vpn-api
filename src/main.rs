@@ -690,6 +690,15 @@ async fn first_purchase_bonus(
     match extend_result {
         Ok(resp) if resp.status().is_success() => {
             info!("[first_purchase_bonus] applied for {}: +14 days {}", telegram_id, plan);
+            // Log payment event — fire-and-forget, never block on it.
+            let _ = sqlx::query(
+                "INSERT INTO payments (telegram_id, source, amount_rub, plan, duration, days_added) \
+                 VALUES ($1, 'first_purchase_bonus', NULL, $2, NULL, 14)"
+            )
+            .bind(telegram_id)
+            .bind(&plan)
+            .execute(pool.get_ref())
+            .await;
             HttpResponse::Ok().json(json!({"applied": true, "days": 14, "plan": plan}))
         }
         Ok(resp) => {
@@ -1805,6 +1814,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::get().to(web_handlers::web_unsubscribe)))
             .service(web::resource("/internal/notify/expiry")
                 .route(web::post().to(web_handlers::internal_notify_expiry)))
+            .service(web::resource("/internal/payments")
+                .route(web::post().to(web_handlers::internal_log_payment)))
             .service(web::resource("/web/me/notifications")
                 .route(web::get().to(web_handlers::web_get_notifications))
                 .route(web::patch().to(web_handlers::web_update_notifications)))
