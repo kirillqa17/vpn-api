@@ -531,6 +531,38 @@ async fn add_referral(pool: web::Data<PgPool>, data: web::Json<AddReferralData>)
     result
 }
 
+fn user_with_bonus_fields(user: &User) -> serde_json::Value {
+    // Eligibility for the banner is simpler than the server-side apply check:
+    // we show the banner if trial is active and deadline hasn't expired and
+    // flag hasn't been flipped. Days left is rounded up.
+    let now = Utc::now();
+    let (eligible, days_left) = match user.first_purchase_bonus_deadline {
+        Some(deadline)
+            if user.is_used_trial
+                && !user.first_purchase_bonus_used
+                && deadline > now =>
+        {
+            let secs = (deadline - now).num_seconds();
+            let days = (secs + 86399) / 86400; // ceil
+            (true, Some(days))
+        }
+        _ => (false, None),
+    };
+
+    let mut v = serde_json::to_value(user).unwrap_or(serde_json::json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("first_purchase_bonus_eligible".into(), serde_json::Value::Bool(eligible));
+        obj.insert(
+            "first_purchase_bonus_days_left".into(),
+            match days_left {
+                Some(d) => serde_json::Value::Number(serde_json::Number::from(d)),
+                None => serde_json::Value::Null,
+            },
+        );
+    }
+    v
+}
+
 async fn get_user_info(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> HttpResponse {
     let mut telegram_id = telegram_id.into_inner();
 
@@ -544,7 +576,7 @@ async fn get_user_info(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> 
     .await;
 
     match result {
-        Ok(user) => return HttpResponse::Ok().json(user),
+        Ok(user) => return HttpResponse::Ok().json(user_with_bonus_fields(&user)),
         Err(_) if telegram_id > 0 => {
             telegram_id = -telegram_id;
         }
@@ -560,7 +592,7 @@ async fn get_user_info(pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> 
     .fetch_one(pool.get_ref())
     .await
     {
-        Ok(user) => HttpResponse::Ok().json(user),
+        Ok(user) => HttpResponse::Ok().json(user_with_bonus_fields(&user)),
         Err(_) => HttpResponse::NotFound().body("User not found"),
     }
 }
@@ -569,28 +601,115 @@ async fn trial(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::J
     let is_used_trial = data.into_inner();
     let telegram_id = telegram_id.into_inner();
     info!("[trial] telegram_id={}, is_used_trial={}", telegram_id, is_used_trial);
-    let result = match sqlx::query!(
+    // When activating trial (is_used_trial=true) for a user who has never had the
+    // deadline set, seed a 7-day first-purchase bonus window. COALESCE keeps any
+    // existing deadline so repeat calls don't reset the window.
+    let result = sqlx::query(
         r#"
-        UPDATE users 
-        SET is_used_trial = $1
+        UPDATE users
+        SET is_used_trial = $1,
+            first_purchase_bonus_deadline = CASE
+                WHEN $1 = true THEN COALESCE(first_purchase_bonus_deadline, NOW() + INTERVAL '7 days')
+                ELSE first_purchase_bonus_deadline
+            END
         WHERE telegram_id = $2
-        "#,
-        is_used_trial,
-        telegram_id
+        "#
     )
+    .bind(is_used_trial)
+    .bind(telegram_id)
     .execute(pool.get_ref())
-    .await {
+    .await;
+
+    match result {
         Ok(result) => {
             if result.rows_affected() == 0 {
                 HttpResponse::NotFound().body("User not found")
-            }   
-            else {
+            } else {
                 HttpResponse::Ok().body("Trial status updated successfully")
             }
         }
-        Err(_) => HttpResponse::InternalServerError().body("Failed to update trial status")
+        Err(e) => {
+            error!("[trial] DB error for {}: {}", telegram_id, e);
+            HttpResponse::InternalServerError().body("Failed to update trial status")
+        }
+    }
+}
+
+/// POST /users/{telegram_id}/first_purchase_bonus
+/// Idempotent: flips the flag atomically via an eligibility-filtered UPDATE,
+/// then calls /users/{tg_id}/extend internally to grant +14 days on the
+/// user's current plan. Returns {"applied": bool, "reason"?: str, "days"?: 14}.
+async fn first_purchase_bonus(
+    pool: web::Data<PgPool>,
+    telegram_id: web::Path<i64>,
+) -> HttpResponse {
+    let telegram_id = telegram_id.into_inner();
+    info!("[first_purchase_bonus] telegram_id={}", telegram_id);
+
+    // Atomic claim: only succeeds if all conditions hold.
+    let claimed: Option<(String,)> = match sqlx::query_as::<_, (String,)>(
+        r#"
+        UPDATE users
+        SET first_purchase_bonus_used = true
+        WHERE telegram_id = $1
+          AND is_used_trial = true
+          AND first_purchase_bonus_used = false
+          AND first_purchase_bonus_deadline IS NOT NULL
+          AND first_purchase_bonus_deadline > NOW()
+        RETURNING plan
+        "#
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            error!("[first_purchase_bonus] DB claim error for {}: {}", telegram_id, e);
+            return HttpResponse::InternalServerError().json(json!({"error": "db error"}));
+        }
     };
-    result
+
+    let plan = match claimed {
+        Some((p,)) => p,
+        None => {
+            info!("[first_purchase_bonus] {} not eligible (already used / no deadline / expired / no trial)", telegram_id);
+            return HttpResponse::Ok().json(json!({"applied": false, "reason": "not eligible"}));
+        }
+    };
+
+    // Internal call to /users/{id}/extend to add 14 days on current plan.
+    // Reuses all the Remnawave-sync logic.
+    let extend_result = HTTP_CLIENT
+        .patch(&format!("http://127.0.0.1:8080/users/{}/extend", telegram_id))
+        .header("Content-Type", "application/json")
+        .json(&json!({"days": 14, "plan": plan}))
+        .send()
+        .await;
+
+    match extend_result {
+        Ok(resp) if resp.status().is_success() => {
+            info!("[first_purchase_bonus] applied for {}: +14 days {}", telegram_id, plan);
+            HttpResponse::Ok().json(json!({"applied": true, "days": 14, "plan": plan}))
+        }
+        Ok(resp) => {
+            error!("[first_purchase_bonus] extend call failed for {}: {}", telegram_id, resp.status());
+            // Roll back the flag so the bonus can be retried later.
+            let _ = sqlx::query("UPDATE users SET first_purchase_bonus_used = false WHERE telegram_id = $1")
+                .bind(telegram_id)
+                .execute(pool.get_ref())
+                .await;
+            HttpResponse::InternalServerError().json(json!({"error": "extend call failed"}))
+        }
+        Err(e) => {
+            error!("[first_purchase_bonus] extend call error for {}: {}", telegram_id, e);
+            let _ = sqlx::query("UPDATE users SET first_purchase_bonus_used = false WHERE telegram_id = $1")
+                .bind(telegram_id)
+                .execute(pool.get_ref())
+                .await;
+            HttpResponse::InternalServerError().json(json!({"error": "extend call network error"}))
+        }
+    }
 }
 
 async fn ref_bonus(pool: web::Data<PgPool>,telegram_id: web::Path<i64>, data: web::Json<bool>) -> HttpResponse {
@@ -1618,6 +1737,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/auto_renew_due").route(web::get().to(get_auto_renew_users)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))
+            .service(web::resource("/users/{telegram_id}/first_purchase_bonus").route(web::post().to(first_purchase_bonus)))
             .service(web::resource("/users/{telegram_id}/is_connected").route(web::get().to(check_connection)))
             .service(web::resource("/users/{telegram_id}/ref_bonus").route(web::patch().to(ref_bonus)))
             .service(web::resource("/users/{telegram_id}/refs").route(web::patch().to(payed_refs)))

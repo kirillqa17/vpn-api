@@ -32,6 +32,8 @@ pub struct User {
     pub auto_renew_fail_count: i32,
     pub is_pro: bool,
     pub card_last4: Option<String>,
+    pub first_purchase_bonus_used: bool,
+    pub first_purchase_bonus_deadline: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

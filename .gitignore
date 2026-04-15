@@ -2,3 +2,4 @@
 .env
 /certs
 .gitignore
+.DS_Store

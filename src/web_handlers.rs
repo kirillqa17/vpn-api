@@ -971,7 +971,8 @@ pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespon
     let user = sqlx::query(
         "SELECT telegram_id, uuid, subscription_end, is_active, created_at, referrals, referral_id, \
          is_used_trial, is_used_ref_bonus, username, plan, sub_link, payed_refs, device_limit, \
-         auto_renew, payment_method_id, auto_renew_plan, auto_renew_duration, is_pro, card_last4 \
+         auto_renew, payment_method_id, auto_renew_plan, auto_renew_duration, is_pro, card_last4, \
+         first_purchase_bonus_used, first_purchase_bonus_deadline \
          FROM users WHERE telegram_id = $1"
     )
     .bind(telegram_id)
@@ -991,6 +992,19 @@ pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespon
     match user {
         Ok(Some(row)) => {
             let referrals: Option<Vec<i64>> = row.get("referrals");
+            let is_used_trial: bool = row.get("is_used_trial");
+            let bonus_used: bool = row.get("first_purchase_bonus_used");
+            let bonus_deadline: Option<chrono::DateTime<chrono::Utc>> = row.get("first_purchase_bonus_deadline");
+            let now = chrono::Utc::now();
+            let (bonus_eligible, bonus_days_left) = match bonus_deadline {
+                Some(deadline) if is_used_trial && !bonus_used && deadline > now => {
+                    let secs = (deadline - now).num_seconds();
+                    let days = (secs + 86399) / 86400;
+                    (true, Some(days))
+                }
+                _ => (false, None),
+            };
+
             HttpResponse::Ok().json(json!({
                 "telegram_id": row.get::<i64, _>("telegram_id"),
                 "uuid": row.get::<uuid::Uuid, _>("uuid").to_string(),
@@ -999,7 +1013,7 @@ pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespon
                 "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
                 "referrals": referrals.unwrap_or_default(),
                 "referral_id": row.get::<Option<i64>, _>("referral_id"),
-                "is_used_trial": row.get::<bool, _>("is_used_trial"),
+                "is_used_trial": is_used_trial,
                 "is_used_ref_bonus": row.get::<bool, _>("is_used_ref_bonus"),
                 "username": row.get::<Option<String>, _>("username").unwrap_or_default(),
                 "plan": row.get::<String, _>("plan"),
@@ -1013,6 +1027,8 @@ pub async fn web_get_me(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespon
                 "is_pro": row.get::<bool, _>("is_pro"),
                 "card_last4": row.get::<Option<String>, _>("card_last4").unwrap_or_default(),
                 "email": email,
+                "first_purchase_bonus_eligible": bonus_eligible,
+                "first_purchase_bonus_days_left": bonus_days_left,
             }))
         }
         Ok(None) => HttpResponse::NotFound().body("User not found"),
