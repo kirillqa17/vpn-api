@@ -20,3 +20,7 @@ CREATE TABLE IF NOT EXISTS email_expiry_sent (
 );
 CREATE INDEX IF NOT EXISTS idx_email_expiry_sent_lookup
     ON email_expiry_sent (telegram_id, kind);
+
+-- vpn-api connects as api_user; grant access to the new table.
+GRANT ALL ON TABLE email_expiry_sent TO api_user;
+GRANT USAGE, SELECT ON SEQUENCE email_expiry_sent_id_seq TO api_user;

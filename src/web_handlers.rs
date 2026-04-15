@@ -3797,3 +3797,93 @@ pub async fn admin_test_email(path: web::Path<String>, req: HttpRequest) -> Http
         Err(e) => HttpResponse::InternalServerError().json(json!({"error": e})),
     }
 }
+
+/// GET /web/me/notifications — current email notification preferences (JWT)
+pub async fn web_get_notifications(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    let row: Option<(String, bool, bool, bool, bool)> = sqlx::query_as::<_, (String, bool, bool, bool, bool)>(
+        "SELECT email, email_verified, notify_news, notify_expiry, notify_support \
+         FROM user_credentials WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .unwrap_or(None);
+
+    match row {
+        Some((email, verified, news, expiry, support)) => HttpResponse::Ok().json(json!({
+            "has_email": true,
+            "email": email,
+            "email_verified": verified,
+            "notify_news": news,
+            "notify_expiry": expiry,
+            "notify_support": support,
+        })),
+        None => HttpResponse::Ok().json(json!({
+            "has_email": false,
+            "email": null,
+            "email_verified": false,
+            "notify_news": false,
+            "notify_expiry": false,
+            "notify_support": false,
+        })),
+    }
+}
+
+/// PATCH /web/me/notifications — update email notification flags (JWT)
+/// Body: { "notify_news"?: bool, "notify_expiry"?: bool, "notify_support"?: bool }
+pub async fn web_update_notifications(
+    pool: web::Data<PgPool>,
+    body: web::Json<serde_json::Value>,
+    req: HttpRequest,
+) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    let news = body.get("notify_news").and_then(|v| v.as_bool());
+    let expiry = body.get("notify_expiry").and_then(|v| v.as_bool());
+    let support = body.get("notify_support").and_then(|v| v.as_bool());
+
+    if news.is_none() && expiry.is_none() && support.is_none() {
+        return HttpResponse::BadRequest().json(json!({"error": "no fields to update"}));
+    }
+
+    // Ensure user_credentials row exists
+    let exists: Option<(i64,)> = sqlx::query_as::<_, (i64,)>(
+        "SELECT 1 FROM user_credentials WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .unwrap_or(None);
+
+    if exists.is_none() {
+        return HttpResponse::BadRequest().json(json!({"error": "no linked email"}));
+    }
+
+    // Build dynamic SET clause
+    let mut set_parts: Vec<String> = Vec::new();
+    if news.is_some() { set_parts.push("notify_news = $2".into()); }
+    if expiry.is_some() { set_parts.push(format!("notify_expiry = ${}", set_parts.len() + 2)); }
+    if support.is_some() { set_parts.push(format!("notify_support = ${}", set_parts.len() + 2)); }
+
+    let sql = format!("UPDATE user_credentials SET {} WHERE telegram_id = $1", set_parts.join(", "));
+    let mut q = sqlx::query(&sql).bind(telegram_id);
+    if let Some(v) = news { q = q.bind(v); }
+    if let Some(v) = expiry { q = q.bind(v); }
+    if let Some(v) = support { q = q.bind(v); }
+
+    match q.execute(pool.get_ref()).await {
+        Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
+        Err(e) => {
+            error!("[web_update_notifications] DB error: {}", e);
+            HttpResponse::InternalServerError().json(json!({"error": "internal server error"}))
+        }
+    }
+}
