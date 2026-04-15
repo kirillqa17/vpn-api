@@ -3854,32 +3854,26 @@ pub async fn web_update_notifications(
         return HttpResponse::BadRequest().json(json!({"error": "no fields to update"}));
     }
 
-    // Ensure user_credentials row exists
-    let exists: Option<(i64,)> = sqlx::query_as::<_, (i64,)>(
-        "SELECT 1 FROM user_credentials WHERE telegram_id = $1"
+    // Single UPDATE with COALESCE — only touches columns where the new value is not NULL.
+    // rows_affected tells us whether the user has a linked email row.
+    let result = sqlx::query(
+        "UPDATE user_credentials SET \
+             notify_news    = COALESCE($2, notify_news), \
+             notify_expiry  = COALESCE($3, notify_expiry), \
+             notify_support = COALESCE($4, notify_support) \
+         WHERE telegram_id = $1"
     )
     .bind(telegram_id)
-    .fetch_optional(pool.get_ref())
-    .await
-    .unwrap_or(None);
+    .bind(news)
+    .bind(expiry)
+    .bind(support)
+    .execute(pool.get_ref())
+    .await;
 
-    if exists.is_none() {
-        return HttpResponse::BadRequest().json(json!({"error": "no linked email"}));
-    }
-
-    // Build dynamic SET clause
-    let mut set_parts: Vec<String> = Vec::new();
-    if news.is_some() { set_parts.push("notify_news = $2".into()); }
-    if expiry.is_some() { set_parts.push(format!("notify_expiry = ${}", set_parts.len() + 2)); }
-    if support.is_some() { set_parts.push(format!("notify_support = ${}", set_parts.len() + 2)); }
-
-    let sql = format!("UPDATE user_credentials SET {} WHERE telegram_id = $1", set_parts.join(", "));
-    let mut q = sqlx::query(&sql).bind(telegram_id);
-    if let Some(v) = news { q = q.bind(v); }
-    if let Some(v) = expiry { q = q.bind(v); }
-    if let Some(v) = support { q = q.bind(v); }
-
-    match q.execute(pool.get_ref()).await {
+    match result {
+        Ok(r) if r.rows_affected() == 0 => {
+            HttpResponse::BadRequest().json(json!({"error": "no linked email"}))
+        }
         Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
         Err(e) => {
             error!("[web_update_notifications] DB error: {}", e);
