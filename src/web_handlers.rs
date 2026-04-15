@@ -3240,6 +3240,16 @@ pub async fn admin_reply_chat(
     match result {
         Ok(_) => {
             info!("[admin_reply_chat] Admin replied to user {} ({} chars)", telegram_id, message.len());
+
+            // Email notification with 10-minute debounce
+            let pool_clone = pool.clone();
+            let msg_clone = message.clone();
+            tokio::spawn(async move {
+                if let Err(e) = maybe_send_support_reply_email(&pool_clone, telegram_id, &msg_clone).await {
+                    warn!("[admin_reply_chat] Email notify failed for {}: {}", telegram_id, e);
+                }
+            });
+
             HttpResponse::Ok().json(json!({"status": "sent", "telegram_id": telegram_id}))
         }
         Err(e) => {
@@ -3540,8 +3550,239 @@ pub async fn internal_save_news(pool: web::Data<PgPool>, body: web::Json<serde_j
     .await;
 
     match result {
-        Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
+        Ok(res) if res.rows_affected() > 0 => {
+            // Fire-and-forget email blast to verified subscribers
+            let pool_clone = pool.clone();
+            let text_owned = text.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = blast_news_email(&pool_clone, &text_owned).await {
+                    error!("[news_blast] failed: {}", e);
+                }
+            });
+            HttpResponse::Ok().json(json!({"status": "ok"}))
+        }
+        Ok(_) => HttpResponse::Ok().json(json!({"status": "ok", "duplicate": true})),
         Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Email notification helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn unsubscribe_url(token: &uuid::Uuid, kind: &str) -> String {
+    format!("https://svoiweb.ru/api/web/unsubscribe/{}?type={}", token, kind)
+}
+
+async fn blast_news_email(pool: &PgPool, news_text: &str) -> Result<(), String> {
+    // First line as headline, rest as body
+    let mut lines = news_text.splitn(2, '\n');
+    let headline = lines.next().unwrap_or("Новости SvoiVPN").trim();
+    let headline = if headline.is_empty() { "Новости SvoiVPN" } else { headline };
+    let body = lines.next().unwrap_or("").trim();
+    let body = if body.is_empty() { news_text } else { body };
+
+    let recipients: Vec<(String, uuid::Uuid)> = sqlx::query_as::<_, (String, uuid::Uuid)>(
+        "SELECT email, unsubscribe_token FROM user_credentials \
+         WHERE email_verified = true AND notify_news = true"
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("DB query failed: {}", e))?;
+
+    info!("[news_blast] sending to {} recipients", recipients.len());
+
+    let mut sent = 0usize;
+    let mut failed = 0usize;
+    for (i, (email, token)) in recipients.iter().enumerate() {
+        let url = unsubscribe_url(token, "news");
+        match crate::email::send_news_email(email, headline, body, &url).await {
+            Ok(_) => sent += 1,
+            Err(e) => {
+                failed += 1;
+                warn!("[news_blast] failed for {}: {}", email, e);
+            }
+        }
+        // Throttle: 100ms between sends to avoid SMTP quota
+        if i < recipients.len() - 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    info!("[news_blast] done: sent={} failed={}", sent, failed);
+    Ok(())
+}
+
+async fn maybe_send_support_reply_email(pool: &PgPool, telegram_id: i64, message: &str) -> Result<(), String> {
+    // Look up email + check 10-minute debounce
+    let row: Option<(String, uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>)> =
+        sqlx::query_as::<_, (String, uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>)>(
+            "SELECT email, unsubscribe_token, last_support_email_at FROM user_credentials \
+             WHERE telegram_id = $1 AND email_verified = true AND notify_support = true"
+        )
+        .bind(telegram_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("DB query failed: {}", e))?;
+
+    let (email, token, last_at) = match row {
+        Some(r) => r,
+        None => { return Ok(()); } // No verified email or opted out
+    };
+
+    if let Some(t) = last_at {
+        let elapsed = chrono::Utc::now().signed_duration_since(t);
+        if elapsed.num_minutes() < 10 {
+            info!("[support_email] skipping {} (last sent {} min ago)", telegram_id, elapsed.num_minutes());
+            return Ok(());
+        }
+    }
+
+    let url = unsubscribe_url(&token, "support");
+    crate::email::send_support_reply_email(&email, message, &url).await?;
+
+    let _ = sqlx::query("UPDATE user_credentials SET last_support_email_at = NOW() WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .execute(pool)
+        .await;
+    Ok(())
+}
+
+/// GET /web/unsubscribe/{token}?type=news|expiry|support|all
+pub async fn web_unsubscribe(
+    pool: web::Data<PgPool>,
+    path: web::Path<uuid::Uuid>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    let token = path.into_inner();
+    let kind = query.get("type").map(|s| s.as_str()).unwrap_or("all");
+
+    let column_sql = match kind {
+        "news" => "notify_news = false",
+        "expiry" => "notify_expiry = false",
+        "support" => "notify_support = false",
+        "all" => "notify_news = false, notify_expiry = false, notify_support = false",
+        _ => return HttpResponse::BadRequest().body("invalid type"),
+    };
+
+    let sql = format!("UPDATE user_credentials SET {} WHERE unsubscribe_token = $1 RETURNING email", column_sql);
+    let result: Result<Option<(String,)>, _> = sqlx::query_as(&sql)
+        .bind(token)
+        .fetch_optional(pool.get_ref())
+        .await;
+
+    let email = match result {
+        Ok(Some((e,))) => e,
+        Ok(None) => return HttpResponse::NotFound().body("Ссылка недействительна или устарела."),
+        Err(e) => {
+            error!("[unsubscribe] DB error: {}", e);
+            return HttpResponse::InternalServerError().body("Внутренняя ошибка");
+        }
+    };
+
+    info!("[unsubscribe] {} unsubscribed from {}", email, kind);
+
+    let kind_label = match kind {
+        "news" => "новостей",
+        "expiry" => "уведомлений о подписке",
+        "support" => "ответов поддержки",
+        _ => "всех уведомлений",
+    };
+
+    let html = format!(
+        r#"<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Отписка</title></head>
+        <body style="background:#0a0a0a;color:#e0e0e0;font-family:-apple-system,sans-serif;padding:60px 20px;text-align:center;">
+        <div style="max-width:480px;margin:0 auto;background:#141414;border:1px solid #1e1e1e;border-radius:16px;padding:40px;">
+        <h1 style="color:#7C6BFF;margin:0 0 12px;font-size:24px;">Готово ✓</h1>
+        <p style="margin:0 0 8px;color:#c4c4c4;">{} больше не будет получать {}.</p>
+        <p style="margin:24px 0 0;font-size:13px;color:#666;">Если передумаете — настройки почты в личном кабинете на <a href="https://svoiweb.ru" style="color:#7C6BFF;">svoiweb.ru</a></p>
+        </div></body></html>"#,
+        html_escape_simple(&email), kind_label
+    );
+
+    HttpResponse::Ok().content_type("text/html; charset=utf-8").body(html)
+}
+
+fn html_escape_simple(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// POST /internal/notify/expiry — called by vpn-tg-bot expiry cron
+/// Body: { "telegram_id": i64, "kind": "3_days"|"1_day"|"expired" }
+pub async fn internal_notify_expiry(
+    pool: web::Data<PgPool>,
+    body: web::Json<serde_json::Value>,
+    req: HttpRequest,
+) -> HttpResponse {
+    if let Some(resp) = check_internal_key(&req) { return resp; }
+
+    let telegram_id = match body.get("telegram_id").and_then(|v| v.as_i64()) {
+        Some(t) => t,
+        None => return HttpResponse::BadRequest().json(json!({"error": "telegram_id required"})),
+    };
+    let kind = match body.get("kind").and_then(|v| v.as_str()) {
+        Some(k) if k == "3_days" || k == "1_day" || k == "expired" => k.to_string(),
+        _ => return HttpResponse::BadRequest().json(json!({"error": "kind must be 3_days|1_day|expired"})),
+    };
+
+    // Get user info: plan, subscription_end
+    let user: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as::<_, (String, chrono::DateTime<chrono::Utc>)>(
+        "SELECT plan, subscription_end FROM users WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .unwrap_or(None);
+
+    let (plan, sub_end) = match user {
+        Some(u) => u,
+        None => return HttpResponse::Ok().json(json!({"status": "skipped", "reason": "user not found"})),
+    };
+
+    // Get email + check opt-in
+    let creds: Option<(String, uuid::Uuid)> = sqlx::query_as::<_, (String, uuid::Uuid)>(
+        "SELECT email, unsubscribe_token FROM user_credentials \
+         WHERE telegram_id = $1 AND email_verified = true AND notify_expiry = true"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .unwrap_or(None);
+
+    let (email, token) = match creds {
+        Some(c) => c,
+        None => return HttpResponse::Ok().json(json!({"status": "skipped", "reason": "no email or opted out"})),
+    };
+
+    // Idempotency check via email_expiry_sent
+    let already: Option<(i64,)> = sqlx::query_as::<_, (i64,)>(
+        "SELECT id FROM email_expiry_sent WHERE telegram_id = $1 AND kind = $2 AND subscription_end = $3"
+    )
+    .bind(telegram_id)
+    .bind(&kind)
+    .bind(sub_end)
+    .fetch_optional(pool.get_ref())
+    .await
+    .unwrap_or(None);
+
+    if already.is_some() {
+        return HttpResponse::Ok().json(json!({"status": "skipped", "reason": "already sent"}));
+    }
+
+    let days_left = (sub_end - chrono::Utc::now()).num_days();
+    let url = unsubscribe_url(&token, "expiry");
+    match crate::email::send_expiry_email(&email, &kind, &plan, days_left, &url).await {
+        Ok(_) => {
+            let _ = sqlx::query(
+                "INSERT INTO email_expiry_sent (telegram_id, kind, subscription_end) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"
+            )
+            .bind(telegram_id)
+            .bind(&kind)
+            .bind(sub_end)
+            .execute(pool.get_ref())
+            .await;
+            HttpResponse::Ok().json(json!({"status": "sent"}))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(json!({"error": e})),
     }
 }
 

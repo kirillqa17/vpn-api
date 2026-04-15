@@ -1680,6 +1680,11 @@ async fn main() -> std::io::Result<()> {
                 .route(web::get().to(web_handlers::web_get_news)))
             .service(web::resource("/internal/news")
                 .route(web::post().to(web_handlers::internal_save_news)))
+            // Email notifications
+            .service(web::resource("/web/unsubscribe/{token}")
+                .route(web::get().to(web_handlers::web_unsubscribe)))
+            .service(web::resource("/internal/notify/expiry")
+                .route(web::post().to(web_handlers::internal_notify_expiry)))
             .service(web::resource("/internal/user-email/{tg_id}")
                 .route(web::get().to(web_handlers::internal_get_user_email)))
             .service(web::resource("/internal/send-verify-code")
