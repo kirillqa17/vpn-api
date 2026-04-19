@@ -1169,26 +1169,30 @@ pub async fn web_check_connection(pool: web::Data<PgPool>, req: HttpRequest) -> 
 // === Subscription prices ===
 
 pub async fn web_get_prices() -> HttpResponse {
+    let bs_month_only = std::env::var("BS_MONTH_ONLY")
+        .unwrap_or_else(|_| "false".to_string())
+        .eq_ignore_ascii_case("true");
     let prices = json!({
+        "bs_month_only": bs_month_only,
         "base": {
             "1m": std::env::var("BASE_MONTH").unwrap_or_else(|_| "150".to_string()).parse::<i64>().unwrap_or(150),
             "3m": std::env::var("BASE_3_MONTH").unwrap_or_else(|_| "430".to_string()).parse::<i64>().unwrap_or(430),
             "1y": std::env::var("BASE_YEAR").unwrap_or_else(|_| "1500".to_string()).parse::<i64>().unwrap_or(1500),
         },
         "family": {
-            "1m": std::env::var("FAMILY_MONTH").unwrap_or_else(|_| "200".to_string()).parse::<i64>().unwrap_or(200),
-            "3m": std::env::var("FAMILY_3_MONTH").unwrap_or_else(|_| "570".to_string()).parse::<i64>().unwrap_or(570),
-            "1y": std::env::var("FAMILY_YEAR").unwrap_or_else(|_| "1800".to_string()).parse::<i64>().unwrap_or(1800),
+            "1m": std::env::var("FAMILY_MONTH").unwrap_or_else(|_| "250".to_string()).parse::<i64>().unwrap_or(250),
+            "3m": std::env::var("FAMILY_3_MONTH").unwrap_or_else(|_| "700".to_string()).parse::<i64>().unwrap_or(700),
+            "1y": std::env::var("FAMILY_YEAR").unwrap_or_else(|_| "2200".to_string()).parse::<i64>().unwrap_or(2200),
         },
         "bsbase": {
-            "1m": std::env::var("BSBASE_MONTH").unwrap_or_else(|_| "250".to_string()).parse::<i64>().unwrap_or(250),
-            "3m": std::env::var("BSBASE_3_MONTH").unwrap_or_else(|_| "720".to_string()).parse::<i64>().unwrap_or(720),
-            "1y": std::env::var("BSBASE_YEAR").unwrap_or_else(|_| "2500".to_string()).parse::<i64>().unwrap_or(2500),
+            "1m": std::env::var("BSBASE_MONTH").unwrap_or_else(|_| "450".to_string()).parse::<i64>().unwrap_or(450),
+            "3m": std::env::var("BSBASE_3_MONTH").unwrap_or_else(|_| "1250".to_string()).parse::<i64>().unwrap_or(1250),
+            "1y": std::env::var("BSBASE_YEAR").unwrap_or_else(|_| "4500".to_string()).parse::<i64>().unwrap_or(4500),
         },
         "bsfamily": {
-            "1m": std::env::var("BSFAMILY_MONTH").unwrap_or_else(|_| "300".to_string()).parse::<i64>().unwrap_or(300),
-            "3m": std::env::var("BSFAMILY_3_MONTH").unwrap_or_else(|_| "850".to_string()).parse::<i64>().unwrap_or(850),
-            "1y": std::env::var("BSFAMILY_YEAR").unwrap_or_else(|_| "2700".to_string()).parse::<i64>().unwrap_or(2700),
+            "1m": std::env::var("BSFAMILY_MONTH").unwrap_or_else(|_| "750".to_string()).parse::<i64>().unwrap_or(750),
+            "3m": std::env::var("BSFAMILY_3_MONTH").unwrap_or_else(|_| "2100".to_string()).parse::<i64>().unwrap_or(2100),
+            "1y": std::env::var("BSFAMILY_YEAR").unwrap_or_else(|_| "7500".to_string()).parse::<i64>().unwrap_or(7500),
         }
     });
 
@@ -1275,6 +1279,17 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
     };
 
     info!("[web_create_payment] telegram_id={}, tariff={}, duration={}", telegram_id, data.tariff, data.duration);
+
+    // Temporary restriction: bypass tariffs sold only for 1 month
+    let bs_month_only = std::env::var("BS_MONTH_ONLY")
+        .unwrap_or_else(|_| "false".to_string())
+        .eq_ignore_ascii_case("true");
+    if bs_month_only
+        && (data.tariff == "bsbase" || data.tariff == "bsfamily")
+        && data.duration != "1m"
+    {
+        return HttpResponse::BadRequest().body("Bypass tariffs are temporarily available only for 1 month");
+    }
 
     // Get price
     let prices = get_price_map();
@@ -1442,15 +1457,15 @@ fn get_price_map() -> HashMap<String, i64> {
         ("base_1m", "BASE_MONTH", 150),
         ("base_3m", "BASE_3_MONTH", 430),
         ("base_1y", "BASE_YEAR", 1500),
-        ("family_1m", "FAMILY_MONTH", 200),
-        ("family_3m", "FAMILY_3_MONTH", 570),
-        ("family_1y", "FAMILY_YEAR", 1800),
-        ("bsbase_1m", "BSBASE_MONTH", 250),
-        ("bsbase_3m", "BSBASE_3_MONTH", 720),
-        ("bsbase_1y", "BSBASE_YEAR", 2500),
-        ("bsfamily_1m", "BSFAMILY_MONTH", 300),
-        ("bsfamily_3m", "BSFAMILY_3_MONTH", 850),
-        ("bsfamily_1y", "BSFAMILY_YEAR", 2700),
+        ("family_1m", "FAMILY_MONTH", 250),
+        ("family_3m", "FAMILY_3_MONTH", 700),
+        ("family_1y", "FAMILY_YEAR", 2200),
+        ("bsbase_1m", "BSBASE_MONTH", 450),
+        ("bsbase_3m", "BSBASE_3_MONTH", 1250),
+        ("bsbase_1y", "BSBASE_YEAR", 4500),
+        ("bsfamily_1m", "BSFAMILY_MONTH", 750),
+        ("bsfamily_3m", "BSFAMILY_3_MONTH", 2100),
+        ("bsfamily_1y", "BSFAMILY_YEAR", 7500),
     ];
     for (key, env, default) in pairs {
         let val = std::env::var(env)
@@ -1515,6 +1530,16 @@ pub async fn web_create_crypto_payment(
     };
 
     info!("[web_create_crypto_payment] telegram_id={}, tariff={}, currency={}", telegram_id, data.tariff, data.currency);
+
+    let bs_month_only = std::env::var("BS_MONTH_ONLY")
+        .unwrap_or_else(|_| "false".to_string())
+        .eq_ignore_ascii_case("true");
+    if bs_month_only
+        && (data.tariff == "bsbase" || data.tariff == "bsfamily")
+        && data.duration != "1m"
+    {
+        return HttpResponse::BadRequest().body("Bypass tariffs are temporarily available only for 1 month");
+    }
 
     let prices = get_price_map();
     let key = format!("{}_{}", data.tariff, data.duration);
