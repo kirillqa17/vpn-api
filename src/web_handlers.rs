@@ -3544,6 +3544,74 @@ pub async fn admin_referral_top(pool: web::Data<PgPool>, req: HttpRequest) -> Ht
     }
 }
 
+// === Admin: per-user referral details ===
+
+pub async fn admin_user_referrals(pool: web::Data<PgPool>, path: web::Path<i64>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
+
+    let telegram_id = path.into_inner();
+
+    let user = sqlx::query(
+        "SELECT telegram_id, username, referrals, payed_refs FROM users WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    let row = match user {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "user not found"})),
+        Err(e) => {
+            error!("Internal error: {}", e);
+            return HttpResponse::InternalServerError().json(json!({"error": "internal server error"}));
+        }
+    };
+
+    let username = row.get::<Option<String>, _>("username").unwrap_or_default();
+    let referrals: Option<Vec<i64>> = row.get("referrals");
+    let payed_refs: i64 = row.get("payed_refs");
+    let refs_count = referrals.as_ref().map(|r| r.len()).unwrap_or(0);
+
+    let mut referral_list: Vec<serde_json::Value> = vec![];
+    if let Some(ref ref_ids) = referrals {
+        if !ref_ids.is_empty() {
+            let rows = sqlx::query(
+                "SELECT telegram_id, username, is_active, plan, subscription_end \
+                 FROM users WHERE telegram_id = ANY($1)"
+            )
+            .bind(ref_ids)
+            .fetch_all(pool.get_ref())
+            .await
+            .unwrap_or_default();
+
+            for r in rows {
+                let is_active: i32 = r.get("is_active");
+                let plan: String = r.get("plan");
+                let has_paid = is_active > 0 && plan != "trial" && plan != "free";
+                let sub_end = r.try_get::<chrono::DateTime<chrono::Utc>, _>("subscription_end")
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_default();
+                referral_list.push(json!({
+                    "telegram_id": r.get::<i64, _>("telegram_id"),
+                    "username": r.get::<Option<String>, _>("username").unwrap_or_default(),
+                    "plan": plan,
+                    "is_active": is_active > 0,
+                    "has_paid": has_paid,
+                    "subscription_end": sub_end,
+                }));
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(json!({
+        "telegram_id": telegram_id,
+        "username": username,
+        "referrals_count": refs_count,
+        "payed_refs_count": payed_refs,
+        "referrals": referral_list,
+    }))
+}
+
 // === News ===
 
 pub async fn web_get_news(pool: web::Data<PgPool>) -> HttpResponse {
