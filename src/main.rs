@@ -1149,7 +1149,6 @@ async fn bot_delete_device(pool: web::Data<PgPool>, path: web::Path<(i64, String
 }
 
 async fn create_promo(pool: web::Data<PgPool>, data: web::Json<CreatePromoRequest>, req: HttpRequest) -> HttpResponse {
-    if let Some(resp) = web_handlers::check_admin_key(&req) { return resp; }
     info!("[create_promo] code={}, discount={}%, tariffs={:?}, max_uses={}", data.code, data.discount_percent, data.applicable_tariffs, data.max_uses);
     let result = sqlx::query_as::<_, PromoCode>(
         "INSERT INTO promo_codes (code, discount_percent, applicable_tariffs, max_uses) VALUES ($1, $2, $3, $4) RETURNING *"
@@ -1168,7 +1167,6 @@ async fn create_promo(pool: web::Data<PgPool>, data: web::Json<CreatePromoReques
 }
 
 async fn list_promos(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
-    if let Some(resp) = web_handlers::check_admin_key(&req) { return resp; }
     let result = sqlx::query_as::<_, PromoCode>(
         "SELECT * FROM promo_codes ORDER BY created_at DESC"
     )
@@ -1182,7 +1180,6 @@ async fn list_promos(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse 
 }
 
 async fn deactivate_promo(pool: web::Data<PgPool>, code: web::Path<String>, req: HttpRequest) -> HttpResponse {
-    if let Some(resp) = web_handlers::check_admin_key(&req) { return resp; }
     let code = code.into_inner();
     info!("[deactivate_promo] code={}", code);
     let result = sqlx::query("UPDATE promo_codes SET is_active = false WHERE code = $1")
