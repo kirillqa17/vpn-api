@@ -13,49 +13,69 @@ use chrono::Utc;
 use uuid::Uuid;
 
 // === Security key validation ===
+//
+// Fail-closed authentication for /admin/* and /internal/* endpoints.
+//
+// Both keys MUST be set in the process environment before startup, otherwise
+// `init_auth_keys()` panics — see main.rs. There is no "empty key bypass"
+// and no AUTH_ENFORCE escape hatch (those were P0 vulnerabilities).
+// Comparison is constant-time via the `subtle` crate.
+
+use subtle::ConstantTimeEq;
 
 lazy_static::lazy_static! {
     static ref ADMIN_KEY: String = std::env::var("ADMIN_KEY").unwrap_or_default();
     static ref INTERNAL_KEY: String = std::env::var("INTERNAL_KEY").unwrap_or_default();
-    static ref AUTH_ENFORCE: bool = std::env::var("AUTH_ENFORCE").unwrap_or_default() == "true";
 }
 
-/// Check admin key. Returns Some(403) if enforcement is on and key is invalid.
-pub fn check_admin_key(req: &HttpRequest) -> Option<HttpResponse> {
-    if ADMIN_KEY.is_empty() {
-        return None;
+/// Validate that ADMIN_KEY / INTERNAL_KEY are non-empty and reasonably long.
+/// Call once at startup; panic if missing — production must never start with
+/// open admin endpoints.
+pub fn init_auth_keys() {
+    if ADMIN_KEY.len() < 32 {
+        panic!(
+            "ADMIN_KEY env var must be set to at least 32 characters \
+             before starting the API. Aborting."
+        );
     }
+    if INTERNAL_KEY.len() < 32 {
+        panic!(
+            "INTERNAL_KEY env var must be set to at least 32 characters \
+             before starting the API. Aborting."
+        );
+    }
+    info!("[AUTH] Admin/internal keys loaded (lengths {} / {})", ADMIN_KEY.len(), INTERNAL_KEY.len());
+}
+
+#[inline]
+fn ct_eq(a: &str, b: &str) -> bool {
+    // Constant-time compare. Length mismatch is leaked via the early return,
+    // which is acceptable since the secrets we compare have a fixed length.
+    a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
+/// Check admin key. Returns Some(403) if missing or wrong.
+pub fn check_admin_key(req: &HttpRequest) -> Option<HttpResponse> {
     let provided = req.headers().get("X-Admin-Key")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if provided == ADMIN_KEY.as_str() {
+    if ct_eq(provided, ADMIN_KEY.as_str()) {
         return None;
     }
     warn!("[AUTH] Invalid admin key from {:?} path={}", req.peer_addr(), req.path());
-    if *AUTH_ENFORCE {
-        Some(HttpResponse::Forbidden().json(json!({"error": "forbidden"})))
-    } else {
-        None
-    }
+    Some(HttpResponse::Forbidden().json(json!({"error": "forbidden"})))
 }
 
-/// Check internal key. Returns Some(403) if enforcement is on and key is invalid.
+/// Check internal key. Returns Some(403) if missing or wrong.
 fn check_internal_key(req: &HttpRequest) -> Option<HttpResponse> {
-    if INTERNAL_KEY.is_empty() {
-        return None;
-    }
     let provided = req.headers().get("X-Internal-Key")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if provided == INTERNAL_KEY.as_str() {
+    if ct_eq(provided, INTERNAL_KEY.as_str()) {
         return None;
     }
     warn!("[AUTH] Invalid internal key from {:?} path={}", req.peer_addr(), req.path());
-    if *AUTH_ENFORCE {
-        Some(HttpResponse::Forbidden().json(json!({"error": "forbidden"})))
-    } else {
-        None
-    }
+    Some(HttpResponse::Forbidden().json(json!({"error": "forbidden"})))
 }
 
 // === Auth endpoints ===

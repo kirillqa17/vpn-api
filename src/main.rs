@@ -1702,6 +1702,10 @@ async fn main() -> std::io::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     info!("Server starting...");
     dotenv::dotenv().ok();
+
+    // Fail-closed: refuse to start without valid admin/internal keys.
+    // Hardening for the formerly-bypassable check_admin_key/check_internal_key.
+    web_handlers::init_auth_keys();
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect(&std::env::var("DATABASE_URL").unwrap())
         .await
