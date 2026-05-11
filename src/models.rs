@@ -51,7 +51,7 @@ pub struct AddReferralData {
 
 #[derive(Deserialize)]
 pub struct ExtendSubscriptionRequest {
-    pub days: u32,
+    pub days: i32,
     pub plan: String,
 }
 
