@@ -2593,11 +2593,15 @@ pub async fn app_support_message(
         }
     };
 
-    // 2. Upsert support_tickets to status='open'
+    // 2. Upsert support_tickets to status='open'. Matches the schema
+    // used by the existing /web/support/escalate handler: columns
+    // (telegram_id, username, reason, status, created_at) with a
+    // unique constraint on telegram_id.
     let _ = sqlx::query(
-        "INSERT INTO support_tickets (telegram_id, status, created_at, updated_at) \
-         VALUES ($1, 'open', NOW(), NOW()) \
-         ON CONFLICT (telegram_id) DO UPDATE SET status = 'open', updated_at = NOW()"
+        "INSERT INTO support_tickets (telegram_id, username, reason, status, created_at) \
+         VALUES ($1, NULL, 'Сообщение из приложения', 'open', NOW()) \
+         ON CONFLICT (telegram_id) DO UPDATE SET status = 'open', \
+         reason = 'Сообщение из приложения', created_at = NOW()"
     )
     .bind(telegram_id)
     .execute(pool.get_ref())
