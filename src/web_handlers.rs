@@ -2522,7 +2522,8 @@ pub async fn app_support_message(
             }
         };
 
-        let name = field.name().unwrap_or("").to_string();
+        // actix-multipart 0.6: field.name() returns &str directly, not Option<&str>.
+        let name = field.name().to_string();
         match name.as_str() {
             "message" => {
                 while let Some(chunk) = field.next().await {
@@ -2543,10 +2544,10 @@ pub async fn app_support_message(
                 }
             }
             "logs" => {
-                let content_disposition = field.content_disposition().cloned();
-                log_filename = content_disposition
-                    .as_ref()
-                    .and_then(|cd| cd.get_filename().map(|s| s.to_string()));
+                // actix-multipart 0.6: content_disposition() returns &ContentDisposition
+                // (not Option<&_>) — clone, then ask for the filename.
+                let content_disposition = field.content_disposition().clone();
+                log_filename = content_disposition.get_filename().map(|s| s.to_string());
                 while let Some(chunk) = field.next().await {
                     match chunk {
                         Ok(data) => {
