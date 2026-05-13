@@ -1,4 +1,6 @@
 use actix_web::{web, HttpRequest, HttpResponse};
+use actix_multipart::Multipart;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::postgres::PgPool;
@@ -2492,6 +2494,187 @@ pub async fn web_support_escalate(
     info!("[support_escalate] Created ticket for user {}", telegram_id);
 
     HttpResponse::Ok().json(json!({"status": "escalated"}))
+}
+
+pub async fn app_support_message(
+    pool: web::Data<PgPool>,
+    req: HttpRequest,
+    mut payload: Multipart,
+) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    let mut message = String::new();
+    let mut log_bytes: Vec<u8> = Vec::new();
+    let mut log_filename: Option<String> = None;
+    const MAX_MSG: usize = 4_000;
+    const MAX_LOG: usize = 5 * 1024 * 1024; // 5 MB
+
+    while let Some(field_result) = payload.next().await {
+        let mut field = match field_result {
+            Ok(f) => f,
+            Err(e) => {
+                error!("[app_support_message] multipart error: {}", e);
+                return HttpResponse::BadRequest()
+                    .json(json!({"error": "Invalid multipart payload"}));
+            }
+        };
+
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "message" => {
+                while let Some(chunk) = field.next().await {
+                    match chunk {
+                        Ok(data) => {
+                            if message.len() + data.len() > MAX_MSG {
+                                return HttpResponse::PayloadTooLarge()
+                                    .json(json!({"error": "Message too long"}));
+                            }
+                            message.push_str(std::str::from_utf8(&data).unwrap_or(""));
+                        }
+                        Err(e) => {
+                            error!("[app_support_message] read message error: {}", e);
+                            return HttpResponse::BadRequest()
+                                .json(json!({"error": "Bad message field"}));
+                        }
+                    }
+                }
+            }
+            "logs" => {
+                let content_disposition = field.content_disposition().cloned();
+                log_filename = content_disposition
+                    .as_ref()
+                    .and_then(|cd| cd.get_filename().map(|s| s.to_string()));
+                while let Some(chunk) = field.next().await {
+                    match chunk {
+                        Ok(data) => {
+                            if log_bytes.len() + data.len() > MAX_LOG {
+                                return HttpResponse::PayloadTooLarge()
+                                    .json(json!({"error": "Log file too large"}));
+                            }
+                            log_bytes.extend_from_slice(&data);
+                        }
+                        Err(e) => {
+                            error!("[app_support_message] read logs error: {}", e);
+                            return HttpResponse::BadRequest()
+                                .json(json!({"error": "Bad logs field"}));
+                        }
+                    }
+                }
+            }
+            _ => { /* ignore unknown fields */ }
+        }
+    }
+
+    let message = message.trim();
+    if message.is_empty() {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "Message is required"}));
+    }
+
+    // 1. Insert into support_chats
+    let inserted = sqlx::query(
+        "INSERT INTO support_chats (telegram_id, role, content, created_at) \
+         VALUES ($1, 'user', $2, NOW()) RETURNING created_at"
+    )
+    .bind(telegram_id)
+    .bind(message)
+    .fetch_one(pool.get_ref())
+    .await;
+
+    let created_at: chrono::DateTime<chrono::Utc> = match inserted {
+        Ok(row) => row.get("created_at"),
+        Err(e) => {
+            error!("[app_support_message] insert chat failed: {}", e);
+            return HttpResponse::InternalServerError()
+                .json(json!({"error": "internal server error"}));
+        }
+    };
+
+    // 2. Upsert support_tickets to status='open'
+    let _ = sqlx::query(
+        "INSERT INTO support_tickets (telegram_id, status, created_at, updated_at) \
+         VALUES ($1, 'open', NOW(), NOW()) \
+         ON CONFLICT (telegram_id) DO UPDATE SET status = 'open', updated_at = NOW()"
+    )
+    .bind(telegram_id)
+    .execute(pool.get_ref())
+    .await;
+
+    // 3. Forward to admin TG (fire-and-forget; failure doesn't fail the user request)
+    let log_attach: Option<(String, Vec<u8>)> = if !log_bytes.is_empty() {
+        Some((log_filename.unwrap_or_else(|| "logs.txt".to_string()), log_bytes))
+    } else {
+        None
+    };
+    let user_id_for_log = telegram_id;
+    let message_for_log = message.to_string();
+    actix_web::rt::spawn(async move {
+        forward_app_message_to_admin(user_id_for_log, &message_for_log, log_attach).await;
+    });
+
+    HttpResponse::Ok().json(crate::models::AppSupportMessageResponse {
+        stored: true,
+        created_at,
+        forwarded_to_admin: true,
+    })
+}
+
+async fn forward_app_message_to_admin(
+    user_telegram_id: i64,
+    message: &str,
+    log_attach: Option<(String, Vec<u8>)>,
+) {
+    let bot_token = match std::env::var("SUPPORT_BOT_TOKEN") {
+        Ok(v) => v,
+        Err(_) => { error!("SUPPORT_BOT_TOKEN missing — skipping TG forward"); return; }
+    };
+    let admin_id = match std::env::var("ADMIN_IDS")
+        .ok()
+        .and_then(|s| s.split(',').next().map(|x| x.trim().to_string())) {
+        Some(id) => id,
+        None => { error!("ADMIN_IDS missing — skipping TG forward"); return; }
+    };
+
+    let text = format!(
+        "📨 <b>Сообщение из приложения</b>\nTG: <code>{}</code>\n\n{}",
+        user_telegram_id,
+        html_escape_local(message)
+    );
+
+    let client = reqwest::Client::new();
+    let send_msg_url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+    let resp = client.post(&send_msg_url)
+        .form(&[
+            ("chat_id", admin_id.as_str()),
+            ("text", text.as_str()),
+            ("parse_mode", "HTML"),
+        ])
+        .send().await;
+    if let Err(e) = resp {
+        error!("[forward_app_message_to_admin] sendMessage failed: {}", e);
+    }
+
+    if let Some((filename, bytes)) = log_attach {
+        let doc_url = format!("https://api.telegram.org/bot{}/sendDocument", bot_token);
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename.clone())
+            .mime_str("application/octet-stream")
+            .unwrap();
+        let form = reqwest::multipart::Form::new()
+            .text("chat_id", admin_id)
+            .text("caption", format!("📜 Лог приложения от {}", user_telegram_id))
+            .part("document", part);
+        if let Err(e) = client.post(&doc_url).multipart(form).send().await {
+            error!("[forward_app_message_to_admin] sendDocument failed: {}", e);
+        }
+    }
+}
+
+fn html_escape_local(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 // === Internal support endpoints (no JWT - called by bot from Docker network) ===
