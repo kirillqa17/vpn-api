@@ -2642,8 +2642,13 @@ async fn forward_app_message_to_admin(
         None => { error!("ADMIN_IDS missing — skipping TG forward"); return; }
     };
 
+    // Format MUST embed the user's telegram_id as `ID: <code>{id}</code>` —
+    // the existing `handle_admin_reply` regex in tech-support-bot/main.py
+    // (line ~1559) uses that exact pattern as the fallback when no
+    // ticket_message_to_user entry exists. Don't rename "ID:" without
+    // updating the bot too.
     let text = format!(
-        "📨 <b>Сообщение из приложения</b>\nTG: <code>{}</code>\n\n{}",
+        "📨 <b>Сообщение из приложения</b>\nID: <code>{}</code>\n\n{}",
         user_telegram_id,
         html_escape_local(message)
     );
