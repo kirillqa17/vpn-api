@@ -150,3 +150,10 @@ pub struct InternalSupportEscalateRequest {
     pub telegram_id: i64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AppSupportMessageResponse {
+    pub stored: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub forwarded_to_admin: bool,
+}
+
