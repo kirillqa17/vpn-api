@@ -8,7 +8,7 @@ mod models;
 mod jwt;
 mod web_handlers;
 mod email;
-use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest, SupportChatRequest, InternalSupportChatRequest, InternalSupportEscalateRequest};
+use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest, SupportChatRequest, InternalSupportChatRequest, InternalSupportEscalateRequest, AppSupportMessageResponse};
 use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1861,6 +1861,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::web_support_chat)))
             .service(web::resource("/web/support/escalate")
                 .route(web::post().to(web_handlers::web_support_escalate)))
+            .service(web::resource("/app/support/message")
+                .route(web::post().to(web_handlers::app_support_message)))
             // Public support chat (no JWT)
             .service(web::resource("/web/support/public/history")
                 .route(web::get().to(web_handlers::public_support_history)))
