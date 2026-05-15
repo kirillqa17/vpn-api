@@ -1936,8 +1936,17 @@ pub async fn web_support_history(pool: web::Data<PgPool>, req: HttpRequest) -> H
         Err(resp) => return resp,
     };
 
+    // Pull the `id` and attachment columns so the client can hydrate
+    // per-message thumbnails / download buttons without an N+1 round
+    // trip. Attachment columns nullable — old text-only rows stay
+    // unaffected.
     let rows = sqlx::query(
-        "SELECT role, content, created_at FROM support_chats WHERE telegram_id = $1 AND role != 'system' AND content NOT LIKE '[SYSTEM]%' ORDER BY created_at ASC LIMIT 100"
+        "SELECT id, role, content, created_at, attachment_file_id, \
+                attachment_filename, attachment_mime, attachment_size, \
+                attachment_kind \
+         FROM support_chats \
+         WHERE telegram_id = $1 AND role != 'system' AND content NOT LIKE '[SYSTEM]%' \
+         ORDER BY created_at ASC LIMIT 100"
     )
     .bind(telegram_id)
     .fetch_all(pool.get_ref())
@@ -1956,14 +1965,37 @@ pub async fn web_support_history(pool: web::Data<PgPool>, req: HttpRequest) -> H
     match rows {
         Ok(rows) => {
             let messages: Vec<serde_json::Value> = rows.iter().map(|r| {
+                let id: i64 = r.get("id");
                 let role: String = r.get("role");
                 let content: String = r.get("content");
                 let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
-                json!({
+                let mut obj = json!({
+                    "id": id,
                     "role": if role == "assistant" { "ai".to_string() } else { role },
                     "content": content,
-                    "created_at": created_at.to_rfc3339()
-                })
+                    "created_at": created_at.to_rfc3339(),
+                });
+                // Attach the attachment metadata block only when present
+                // — keeps the JSON skinny for the common (text-only) row.
+                let att_file_id: Option<String> = r.get("attachment_file_id");
+                if let Some(file_id) = att_file_id.as_deref().filter(|s| !s.is_empty()) {
+                    let _ = file_id; // file_id stays server-side; client uses /attachment/{id}
+                    let filename: Option<String> = r.get("attachment_filename");
+                    let mime: Option<String> = r.get("attachment_mime");
+                    let size: Option<i64> = r.get("attachment_size");
+                    let kind: Option<String> = r.get("attachment_kind");
+                    obj.as_object_mut().unwrap().insert(
+                        "attachment".to_string(),
+                        json!({
+                            "id": id,
+                            "kind": kind.unwrap_or_else(|| "document".to_string()),
+                            "filename": filename.unwrap_or_default(),
+                            "mime": mime.unwrap_or_else(|| "application/octet-stream".to_string()),
+                            "size": size.unwrap_or(0),
+                        }),
+                    );
+                }
+                obj
             }).collect();
             HttpResponse::Ok().json(json!({ "messages": messages, "escalated": escalated }))
         }
@@ -2624,6 +2656,8 @@ pub async fn app_support_message(
         stored: true,
         created_at,
         forwarded_to_admin: true,
+        chat_id: None,
+        attachment: None,
     })
 }
 
@@ -2872,6 +2906,526 @@ fn build_app_ticket_text(
 
 fn html_escape_local(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+// === App support: attachment upload + proxy-fetch ===
+
+/// Telegram Bot API limits we mirror on the client side. 50 MiB matches
+/// sendDocument's cap; sendPhoto's 10 MiB is enforced by retrying as a
+/// document if the incoming MIME is an image but the file exceeds the
+/// photo limit.
+const ATTACHMENT_MAX_BYTES: usize = 50 * 1024 * 1024;
+const PHOTO_MAX_BYTES: usize = 10 * 1024 * 1024;
+const ATTACHMENT_FILENAME_MAX: usize = 256;
+
+/// POST /api/app/support/attachment — multipart form with:
+///   - `message` (optional text, ≤4000 chars): user-typed caption to
+///     accompany the file in both DB and admin TG. Stored as the
+///     support_chats.content alongside the attachment metadata.
+///   - `attachment` (required file, ≤50 MiB): photo / video / arbitrary
+///     binary. Forwarded to the admin TG via sendPhoto / sendVideo /
+///     sendDocument depending on MIME, then the file_id returned by
+///     Telegram is persisted in support_chats so the user can re-fetch
+///     it later through GET /api/app/support/attachment/{id}.
+///
+/// Auth: same JWT extraction as app_support_message — owner-only.
+pub async fn app_support_attachment_upload(
+    pool: web::Data<PgPool>,
+    req: HttpRequest,
+    mut payload: Multipart,
+) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    let mut caption = String::new();
+    let mut file_bytes: Vec<u8> = Vec::new();
+    let mut filename: Option<String> = None;
+    let mut declared_mime: Option<String> = None;
+    const MAX_CAPTION: usize = 4_000;
+
+    while let Some(field_result) = payload.next().await {
+        let mut field = match field_result {
+            Ok(f) => f,
+            Err(e) => {
+                error!("[app_support_attachment_upload] multipart error: {}", e);
+                return HttpResponse::BadRequest()
+                    .json(json!({"error": "Invalid multipart payload"}));
+            }
+        };
+        let name = field.name().to_string();
+        match name.as_str() {
+            "message" => {
+                while let Some(chunk) = field.next().await {
+                    match chunk {
+                        Ok(data) => {
+                            if caption.len() + data.len() > MAX_CAPTION {
+                                return HttpResponse::PayloadTooLarge()
+                                    .json(json!({"error": "Message too long"}));
+                            }
+                            caption.push_str(std::str::from_utf8(&data).unwrap_or(""));
+                        }
+                        Err(e) => {
+                            error!("[app_support_attachment_upload] read message: {}", e);
+                            return HttpResponse::BadRequest()
+                                .json(json!({"error": "Bad message field"}));
+                        }
+                    }
+                }
+            }
+            "attachment" => {
+                let cd = field.content_disposition().clone();
+                filename = cd.get_filename().map(|s| s.to_string());
+                declared_mime = field.content_type().map(|m| m.to_string());
+                while let Some(chunk) = field.next().await {
+                    match chunk {
+                        Ok(data) => {
+                            if file_bytes.len() + data.len() > ATTACHMENT_MAX_BYTES {
+                                return HttpResponse::PayloadTooLarge()
+                                    .json(json!({"error": "Attachment exceeds 50 MiB limit"}));
+                            }
+                            file_bytes.extend_from_slice(&data);
+                        }
+                        Err(e) => {
+                            error!("[app_support_attachment_upload] read attachment: {}", e);
+                            return HttpResponse::BadRequest()
+                                .json(json!({"error": "Bad attachment field"}));
+                        }
+                    }
+                }
+            }
+            _ => { /* ignore unknown fields */ }
+        }
+    }
+
+    if file_bytes.is_empty() {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "Attachment file is required"}));
+    }
+
+    // Pick a sane filename. Some clients omit Content-Disposition's
+    // filename (Android Photo Picker URIs in particular), so synthesize
+    // one from the MIME so the admin downloads a file with a sensible
+    // extension instead of "blob".
+    let mut fname = filename.unwrap_or_default();
+    if fname.is_empty() {
+        fname = synthesize_filename(declared_mime.as_deref());
+    }
+    if fname.len() > ATTACHMENT_FILENAME_MAX {
+        // Pathologically long filenames break TG's caption length budget
+        // when echoed back in error messages — clamp to a reasonable
+        // length while keeping the extension intact.
+        let ext_dot = fname.rfind('.').filter(|i| fname.len() - i <= 8);
+        if let Some(i) = ext_dot {
+            let ext = fname[i..].to_string();
+            fname.truncate(ATTACHMENT_FILENAME_MAX - ext.len());
+            fname.push_str(&ext);
+        } else {
+            fname.truncate(ATTACHMENT_FILENAME_MAX);
+        }
+    }
+    let mime = declared_mime.unwrap_or_else(|| guess_mime_from_filename(&fname));
+    let size = file_bytes.len() as i64;
+    let caption = caption.trim().to_string();
+
+    // Decide TG send method by MIME family. Force sendDocument for
+    // oversized photos so we don't get a TG 400 back. Animated GIFs go
+    // as documents (sendAnimation requires a separate code path and we
+    // don't want to add it for v1).
+    let kind = classify_attachment(&mime, file_bytes.len());
+
+    // Forward to admin TG and capture the file_id. We refuse to insert
+    // the chat row when TG forward fails — otherwise the user would see
+    // their own bubble with a working "download" button, but the admin
+    // wouldn't have received anything, which is the worst possible
+    // mismatch.
+    let user_info = fetch_user_info_for_ticket(telegram_id).await;
+    let admin_caption = build_attachment_caption(telegram_id, &caption, &user_info);
+    let tg_result = forward_attachment_to_admin(
+        kind,
+        &fname,
+        &mime,
+        file_bytes.clone(),
+        &admin_caption,
+        telegram_id,
+    ).await;
+
+    let (tg_file_id, kind_str) = match tg_result {
+        Ok(v) => v,
+        Err(e) => {
+            error!("[app_support_attachment_upload] TG forward failed: {}", e);
+            return HttpResponse::BadGateway()
+                .json(json!({"error": format!("Telegram forward failed: {}", e)}));
+        }
+    };
+
+    // Store row with attachment metadata. content carries the optional
+    // user caption (empty string when none provided — keeps the NOT NULL
+    // constraint on `content` happy).
+    let inserted = sqlx::query(
+        "INSERT INTO support_chats \
+         (telegram_id, role, content, attachment_file_id, attachment_filename, \
+          attachment_mime, attachment_size, attachment_kind, created_at) \
+         VALUES ($1, 'user', $2, $3, $4, $5, $6, $7, NOW()) \
+         RETURNING id, created_at"
+    )
+    .bind(telegram_id)
+    .bind(&caption)
+    .bind(&tg_file_id)
+    .bind(&fname)
+    .bind(&mime)
+    .bind(size)
+    .bind(kind_str)
+    .fetch_one(pool.get_ref())
+    .await;
+
+    let (chat_id, created_at): (i64, chrono::DateTime<chrono::Utc>) = match inserted {
+        Ok(row) => (row.get("id"), row.get("created_at")),
+        Err(e) => {
+            error!("[app_support_attachment_upload] insert failed: {}", e);
+            return HttpResponse::InternalServerError()
+                .json(json!({"error": "internal server error"}));
+        }
+    };
+
+    // Open the ticket so admin replies route back. Same upsert as
+    // app_support_message.
+    let _ = sqlx::query(
+        "INSERT INTO support_tickets (telegram_id, username, reason, status, created_at) \
+         VALUES ($1, NULL, 'Файл из приложения', 'open', NOW()) \
+         ON CONFLICT (telegram_id) DO UPDATE SET status = 'open', \
+         reason = 'Файл из приложения', created_at = NOW()"
+    )
+    .bind(telegram_id)
+    .execute(pool.get_ref())
+    .await;
+
+    HttpResponse::Ok().json(crate::models::AppSupportMessageResponse {
+        stored: true,
+        created_at,
+        forwarded_to_admin: true,
+        chat_id: Some(chat_id),
+        attachment: Some(crate::models::SupportAttachmentMeta {
+            id: chat_id,
+            kind: kind_str.to_string(),
+            filename: fname,
+            mime,
+            size,
+        }),
+    })
+}
+
+/// GET /api/app/support/attachment/{id} — streams the file bytes the
+/// owner originally uploaded, by asking Telegram for them and pushing
+/// the response through.
+///
+/// We don't expose the underlying `https://api.telegram.org/file/bot…`
+/// URL to the client because it contains the bot token. Proxying also
+/// gives us a chokepoint for auth: only the row's owner can fetch.
+pub async fn app_support_attachment_get(
+    pool: web::Data<PgPool>,
+    req: HttpRequest,
+    path: web::Path<i64>,
+) -> HttpResponse {
+    let owner = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let chat_id = path.into_inner();
+
+    // Fetch row + verify ownership in one shot. Returning 404 (not 403)
+    // for cross-user access keeps file_id existence indistinguishable.
+    let row = sqlx::query(
+        "SELECT telegram_id, attachment_file_id, attachment_filename, \
+                attachment_mime, attachment_kind \
+         FROM support_chats WHERE id = $1"
+    )
+    .bind(chat_id)
+    .fetch_optional(pool.get_ref())
+    .await;
+
+    let row = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            error!("[app_support_attachment_get] query failed: {}", e);
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    let row_owner: i64 = row.get("telegram_id");
+    if row_owner != owner {
+        return HttpResponse::NotFound().finish();
+    }
+    let file_id: Option<String> = row.get("attachment_file_id");
+    let file_id = match file_id {
+        Some(s) if !s.is_empty() => s,
+        _ => return HttpResponse::NotFound().finish(),
+    };
+    let mime: Option<String> = row.get("attachment_mime");
+    let filename: Option<String> = row.get("attachment_filename");
+
+    let bot_token = match std::env::var("SUPPORT_BOT_TOKEN") {
+        Ok(v) => v,
+        Err(_) => {
+            error!("[app_support_attachment_get] SUPPORT_BOT_TOKEN missing");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    // 1) getFile — small JSON call to convert file_id → file_path.
+    let client = reqwest::Client::new();
+    let get_file_url = format!("https://api.telegram.org/bot{}/getFile", bot_token);
+    let gf = client.post(&get_file_url)
+        .form(&[("file_id", file_id.as_str())])
+        .send().await;
+    let gf_text = match gf {
+        Ok(r) => match r.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                error!("[app_support_attachment_get] getFile read body: {}", e);
+                return HttpResponse::BadGateway().finish();
+            }
+        },
+        Err(e) => {
+            error!("[app_support_attachment_get] getFile: {}", e);
+            return HttpResponse::BadGateway().finish();
+        }
+    };
+    let file_path = match serde_json::from_str::<serde_json::Value>(&gf_text)
+        .ok()
+        .and_then(|v| v.get("result").and_then(|r| r.get("file_path"))
+                       .and_then(|p| p.as_str()).map(|s| s.to_string()))
+    {
+        Some(p) => p,
+        None => {
+            error!("[app_support_attachment_get] getFile bad response: {}", gf_text);
+            return HttpResponse::BadGateway().finish();
+        }
+    };
+
+    // 2) Fetch the bytes from TG's file CDN.
+    let file_url = format!("https://api.telegram.org/file/bot{}/{}", bot_token, file_path);
+    let resp = client.get(&file_url).send().await;
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            error!("[app_support_attachment_get] file fetch: {}", e);
+            return HttpResponse::BadGateway().finish();
+        }
+    };
+    let status = resp.status();
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            error!("[app_support_attachment_get] read file: {}", e);
+            return HttpResponse::BadGateway().finish();
+        }
+    };
+    if !status.is_success() {
+        return HttpResponse::BadGateway().finish();
+    }
+
+    let ct = mime.unwrap_or_else(|| "application/octet-stream".to_string());
+    let cd = filename
+        .filter(|s| !s.is_empty())
+        .map(|f| format!("inline; filename=\"{}\"", f.replace('"', "")));
+
+    let mut builder = HttpResponse::Ok();
+    builder.content_type(ct);
+    if let Some(cd) = cd {
+        builder.append_header(("Content-Disposition", cd));
+    }
+    // Cache-Control: private + short max-age. Files live forever on
+    // TG but the proxy URL is per-user (auth-gated), so caching in
+    // the OS http cache is fine. App-side Coil also caches.
+    builder.append_header(("Cache-Control", "private, max-age=3600"));
+    builder.body(bytes)
+}
+
+// ── helpers ────────────────────────────────────────────────────────
+
+/// "photo" / "video" / "document" — drives which Telegram send method
+/// we call. Photos > PHOTO_MAX_BYTES go as document so we don't trip
+/// TG's 10 MiB photo limit and lose the upload.
+fn classify_attachment(mime: &str, size: usize) -> &'static str {
+    if mime.starts_with("image/") && mime != "image/gif" && size <= PHOTO_MAX_BYTES {
+        "photo"
+    } else if mime.starts_with("video/") {
+        "video"
+    } else {
+        "document"
+    }
+}
+
+fn synthesize_filename(mime: Option<&str>) -> String {
+    let ext = match mime {
+        Some("image/jpeg") | Some("image/jpg") => "jpg",
+        Some("image/png") => "png",
+        Some("image/webp") => "webp",
+        Some("image/gif") => "gif",
+        Some("image/heic") => "heic",
+        Some("video/mp4") => "mp4",
+        Some("video/quicktime") => "mov",
+        Some("video/x-matroska") => "mkv",
+        Some("application/pdf") => "pdf",
+        Some("application/zip") => "zip",
+        Some("text/plain") => "txt",
+        _ => "bin",
+    };
+    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    format!("attachment-{}.{}", ts, ext)
+}
+
+fn guess_mime_from_filename(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let ext = lower.rsplit('.').next().unwrap_or("");
+    match ext {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "heic" => "image/heic",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
+    }.to_string()
+}
+
+/// Variant of build_app_ticket_text optimised for attachment captions
+/// (Telegram caption limit is 1024 chars, vs 4096 for plain text).
+/// Drops the bottom message body so the limit applies only to the rich
+/// user-info envelope; the attached photo / file is the payload.
+fn build_attachment_caption(
+    telegram_id: i64,
+    user_caption: &str,
+    info: &AppTicketUserInfo,
+) -> String {
+    let username_line = match info.username.as_deref() {
+        Some(u) if !u.is_empty() => format!("<b>Пользователь:</b> @{}", html_escape_local(u)),
+        _ => "<b>Пользователь:</b> —".to_string(),
+    };
+    let email_line = format!(
+        "<b>Email:</b> {}",
+        info.email.as_deref().map(html_escape_local).unwrap_or_else(|| "—".to_string()),
+    );
+    let caption_block = if user_caption.is_empty() {
+        String::new()
+    } else {
+        format!("\n📝 {}", html_escape_local(user_caption))
+    };
+    let body = format!(
+        "📎 <b>ФАЙЛ ИЗ ПРИЛОЖЕНИЯ</b>\n\
+         ━━━━━━━━━━━━━━━━━━━━\n\
+         {username_line}\n\
+         <b>ID:</b> <code>{tg_id}</code>\n\
+         {email_line}\n\
+         <b>Тариф:</b> {plan}\n\
+         <b>Статус:</b> {status}\n\
+         <b>Окончание:</b> {sub_end}{caption}",
+        username_line = username_line,
+        tg_id = telegram_id,
+        email_line = email_line,
+        plan = info.plan_display,
+        status = info.status,
+        sub_end = info.sub_end_msk,
+        caption = caption_block,
+    );
+    // Cap to TG's 1024-char caption limit. Chops at a char boundary.
+    let mut out = body;
+    if out.chars().count() > 1024 {
+        out = out.chars().take(1020).collect::<String>() + "…";
+    }
+    out
+}
+
+/// Fires the file at the admin TG via the appropriate send method, then
+/// extracts the bot file_id we need to persist. Returns (file_id, kind_str).
+async fn forward_attachment_to_admin(
+    kind: &'static str,
+    filename: &str,
+    mime: &str,
+    bytes: Vec<u8>,
+    caption: &str,
+    telegram_id: i64,
+) -> Result<(String, &'static str), String> {
+    let bot_token = std::env::var("SUPPORT_BOT_TOKEN")
+        .map_err(|_| "SUPPORT_BOT_TOKEN missing".to_string())?;
+    let admin_id = std::env::var("ADMIN_IDS")
+        .ok()
+        .and_then(|s| s.split(',').next().map(|x| x.trim().to_string()))
+        .ok_or_else(|| "ADMIN_IDS missing".to_string())?;
+
+    let (endpoint, field_name) = match kind {
+        "photo" => ("sendPhoto", "photo"),
+        "video" => ("sendVideo", "video"),
+        _       => ("sendDocument", "document"),
+    };
+    let url = format!("https://api.telegram.org/bot{}/{}", bot_token, endpoint);
+
+    let reply_markup = serde_json::json!({
+        "inline_keyboard": [[
+            { "text": "📖 Открыть переписку", "callback_data": format!("open_ticket_{}", telegram_id) },
+            { "text": "✅ Закрыть тикет",     "callback_data": format!("close_ticket_{}", telegram_id) },
+        ]]
+    }).to_string();
+
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(filename.to_string())
+        .mime_str(mime)
+        .map_err(|e| format!("bad mime: {}", e))?;
+
+    let form = reqwest::multipart::Form::new()
+        .text("chat_id", admin_id)
+        .text("caption", caption.to_string())
+        .text("parse_mode", "HTML")
+        .text("reply_markup", reply_markup)
+        .part(field_name, part);
+
+    let client = reqwest::Client::new();
+    let resp = client.post(&url).multipart(form).send().await
+        .map_err(|e| format!("network: {}", e))?;
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| format!("read body: {}", e))?;
+    if !status.is_success() {
+        return Err(format!("TG {} returned {}: {}", endpoint, status, body));
+    }
+    let v: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("bad json: {}", e))?;
+    if !v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return Err(format!("TG !ok: {}", body));
+    }
+    // sendPhoto returns result.photo: [PhotoSize, …]; take the largest.
+    // sendDocument returns result.document.file_id.
+    // sendVideo returns result.video.file_id.
+    let result = v.get("result").ok_or_else(|| "no .result".to_string())?;
+    let file_id = match kind {
+        "photo" => {
+            let arr = result.get("photo").and_then(|x| x.as_array())
+                .ok_or_else(|| "no .photo array".to_string())?;
+            arr.last()
+                .and_then(|x| x.get("file_id"))
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| "no file_id in photo[]".to_string())?
+        }
+        "video" => result.get("video")
+            .and_then(|x| x.get("file_id"))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "no .video.file_id".to_string())?,
+        _ => result.get("document")
+            .and_then(|x| x.get("file_id"))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "no .document.file_id".to_string())?,
+    };
+    Ok((file_id, kind))
 }
 
 // === Internal support endpoints (no JWT - called by bot from Docker network) ===

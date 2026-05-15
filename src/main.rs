@@ -1849,6 +1849,14 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::web_support_escalate)))
             .service(web::resource("/app/support/message")
                 .route(web::post().to(web_handlers::app_support_message)))
+            // Attachment endpoints — upload (multipart) and proxy-fetch.
+            // Both are JWT-gated; the upload forwards to TG and stores
+            // the bot file_id in support_chats, the GET proxies the file
+            // bytes back from Telegram.
+            .service(web::resource("/app/support/attachment")
+                .route(web::post().to(web_handlers::app_support_attachment_upload)))
+            .service(web::resource("/app/support/attachment/{id}")
+                .route(web::get().to(web_handlers::app_support_attachment_get)))
             // Public support chat (no JWT)
             .service(web::resource("/web/support/public/history")
                 .route(web::get().to(web_handlers::public_support_history)))

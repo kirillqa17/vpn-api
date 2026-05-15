@@ -155,5 +155,29 @@ pub struct AppSupportMessageResponse {
     pub stored: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub forwarded_to_admin: bool,
+    /// support_chats.id of the row just inserted. Returned to the
+    /// uploader so the client can immediately render the attachment
+    /// (the `attachment` field below) without waiting for a history
+    /// re-fetch. Optional for backward-compat with 1.5.x clients that
+    /// ignore unknown JSON fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<i64>,
+    /// Attachment metadata when this row carries one. None for
+    /// text-only messages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<SupportAttachmentMeta>,
+}
+
+/// Slim attachment descriptor returned alongside every history /
+/// upload response that has an attached file. The `id` field is the
+/// support_chats row id — it's what the client uses to fetch the file
+/// bytes via GET /api/app/support/attachment/{id}.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SupportAttachmentMeta {
+    pub id: i64,
+    pub kind: String,       // "photo" | "video" | "document"
+    pub filename: String,
+    pub mime: String,
+    pub size: i64,
 }
 
