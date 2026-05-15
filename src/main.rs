@@ -347,12 +347,13 @@ async fn extend_subscription(
     info!("[extend_subscription] User {} squads={:?}, is_pro={}, tag={}", telegram_id, squad_list, user.is_pro, tag);
 
     let now_utc = Utc::now();
+    // Always extend from the later of (existing end, now). Never destroy paid time:
+    // plan upgrades (family <-> bsfamily), milestone bonuses, and downgrades keep
+    // all remaining days and add `days` more on top. Previous "plan_changed -> reset"
+    // branch was destructive — incident 2026-05-14: 180-day ref milestone reset
+    // active subscriptions to NOW+180.
     let plan_changed = user.plan != plan && plan != "trial" && plan != "free";
-    let effective_start_time = if plan_changed {
-        now_utc
-    } else {
-        std::cmp::max(user.subscription_end, now_utc)
-    };
+    let effective_start_time = std::cmp::max(user.subscription_end, now_utc);
     let expire_at = effective_start_time + Duration::days(days.into());
     let expire_at_str = expire_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
@@ -391,47 +392,32 @@ async fn extend_subscription(
         return HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"}));
     }
 
-    let result = if plan_changed {
-        sqlx::query_as!(
-            User,
-            r#"
-            UPDATE users
-            SET
-                subscription_end = NOW() + $1 * INTERVAL '1 day',
-                is_active = 1,
-                plan = $2,
-                device_limit = $4
-            WHERE telegram_id = $3
-            RETURNING *
-            "#,
-            days as i32,
-            plan,
-            telegram_id,
-            device_limit as i64
-        )
-        .fetch_one(pool.get_ref())
-        .await
-    } else {
-        sqlx::query_as!(
-            User,
-            r#"
-            UPDATE users
-            SET
-                subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day',
-                is_active = 1,
-                plan = $2,
-                device_limit = $4
-            WHERE telegram_id = $3
-            RETURNING *
-            "#,
-            days as i32,
-            plan,
-            telegram_id,
-            device_limit as i64
-        )
-        .fetch_one(pool.get_ref())
-        .await
-    };
+    // Single non-destructive UPDATE path. plan_changed kept for logging only.
+    if plan_changed {
+        info!(
+            "[extend_subscription] User {} plan transition: {} -> {} (subscription_end preserved)",
+            telegram_id, user.plan, plan
+        );
+    }
+    let result = sqlx::query_as!(
+        User,
+        r#"
+        UPDATE users
+        SET
+            subscription_end = GREATEST(subscription_end, NOW()) + $1 * INTERVAL '1 day',
+            is_active = 1,
+            plan = $2,
+            device_limit = $4
+        WHERE telegram_id = $3
+        RETURNING *
+        "#,
+        days as i32,
+        plan,
+        telegram_id,
+        device_limit as i64
+    )
+    .fetch_one(pool.get_ref())
+    .await;
     match result {
         Ok(user) => {
             info!("[extend_subscription] Success for user {}: plan={}, sub_end={}", user.telegram_id, user.plan, user.subscription_end);
