@@ -2632,6 +2632,25 @@ async fn forward_app_message_to_admin(
     message: &str,
     log_attach: Option<(String, Vec<u8>)>,
 ) {
+    // Indirection: queries DB for the rich user-info envelope, falls back
+    // to a slim "ID-only" ticket if the DB lookup blows up. We never want
+    // the user's support message to disappear silently — that's worse
+    // than a less-informative TG notification.
+    forward_app_message_to_admin_inner(user_telegram_id, message, log_attach).await;
+}
+
+/// Pool-free helper: lazily acquires a fresh PgPool from DATABASE_URL on
+/// each call. We avoid threading the existing actix-web Data<PgPool>
+/// through the spawn boundary because the original handler already
+/// detaches the forward into actix::rt::spawn, and reaching back across
+/// the spawn would force the whole call chain to hold a 'static pool
+/// reference. A short-lived connection here is fine — this only fires
+/// once per user-sent support message.
+async fn forward_app_message_to_admin_inner(
+    user_telegram_id: i64,
+    message: &str,
+    log_attach: Option<(String, Vec<u8>)>,
+) {
     let bot_token = match std::env::var("SUPPORT_BOT_TOKEN") {
         Ok(v) => v,
         Err(_) => { error!("SUPPORT_BOT_TOKEN missing — skipping TG forward"); return; }
@@ -2643,16 +2662,29 @@ async fn forward_app_message_to_admin(
         None => { error!("ADMIN_IDS missing — skipping TG forward"); return; }
     };
 
-    // Format MUST embed the user's telegram_id as `ID: <code>{id}</code>` —
-    // the existing `handle_admin_reply` regex in tech-support-bot/main.py
-    // (line ~1559) uses that exact pattern as the fallback when no
-    // ticket_message_to_user entry exists. Don't rename "ID:" without
-    // updating the bot too.
-    let text = format!(
-        "📨 <b>Сообщение из приложения</b>\nID: <code>{}</code>\n\n{}",
-        user_telegram_id,
-        html_escape_local(message)
-    );
+    let user_info = fetch_user_info_for_ticket(user_telegram_id).await;
+
+    // Header explicitly tagged "📱 ТИКЕТ ИЗ ПРИЛОЖЕНИЯ" so the admin can
+    // tell at a glance that this came from the SvoiVPN mobile client and
+    // not a Telegram-bot conversation. The body block mirrors the
+    // bot's `create_admin_ticket()` layout (Email/Тариф/Статус/...)
+    // exactly so the admin's eye doesn't have to switch between two
+    // formats for ticket triage.
+    //
+    // The `ID: <code>{id}</code>` line MUST stay verbatim — the bot's
+    // `handle_admin_reply` (tech-support-bot/main.py:~1559) uses that
+    // regex to route admin replies back to this user.
+    let text = build_app_ticket_text(user_telegram_id, message, &user_info);
+
+    // Inline buttons that the existing bot already wires up: "open ticket"
+    // and "close ticket" callbacks are handled in main.py's
+    // callback_query_handler. We just send the same callback_data.
+    let reply_markup = serde_json::json!({
+        "inline_keyboard": [[
+            { "text": "📖 Открыть переписку", "callback_data": format!("open_ticket_{}", user_telegram_id) },
+            { "text": "✅ Закрыть тикет", "callback_data": format!("close_ticket_{}", user_telegram_id) },
+        ]]
+    }).to_string();
 
     let client = reqwest::Client::new();
     let send_msg_url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
@@ -2661,6 +2693,7 @@ async fn forward_app_message_to_admin(
             ("chat_id", admin_id.as_str()),
             ("text", text.as_str()),
             ("parse_mode", "HTML"),
+            ("reply_markup", reply_markup.as_str()),
         ])
         .send().await;
     if let Err(e) = resp {
@@ -2681,6 +2714,160 @@ async fn forward_app_message_to_admin(
             error!("[forward_app_message_to_admin] sendDocument failed: {}", e);
         }
     }
+}
+
+/// Rich user-info envelope for the app-ticket Telegram notification.
+/// All fields default to "—" so a missing row never breaks the message.
+#[derive(Default)]
+struct AppTicketUserInfo {
+    username: Option<String>,
+    email: Option<String>,
+    plan_display: String,
+    status: String,
+    is_pro: bool,
+    sub_end_msk: String,
+    auto_renew: bool,
+    card_last4: Option<String>,
+    device_limit: i64,
+    messages_in_conv: i64,
+}
+
+async fn fetch_user_info_for_ticket(telegram_id: i64) -> AppTicketUserInfo {
+    let mut info = AppTicketUserInfo::default();
+    info.plan_display = "—".to_string();
+    info.status = "—".to_string();
+    info.sub_end_msk = "—".to_string();
+    info.device_limit = 0;
+
+    let db_url = match std::env::var("DATABASE_URL") {
+        Ok(v) => v,
+        Err(_) => { error!("DATABASE_URL missing — sending slim ticket"); return info; }
+    };
+
+    let pool = match sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(3))
+        .connect(&db_url)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => { error!("[ticket] pool connect failed: {}", e); return info; }
+    };
+
+    // users table: plan, status, expiry, auto-renew, card, device limit, username.
+    if let Ok(Some(row)) = sqlx::query(
+        "SELECT username, plan, is_active, is_pro, subscription_end, auto_renew, card_last4, device_limit \
+         FROM users WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        info.username = row.try_get::<Option<String>, _>("username").ok().flatten();
+        let plan_raw: String = row.try_get("plan").unwrap_or_default();
+        info.plan_display = plan_display_name(&plan_raw);
+        let is_active: i32 = row.try_get("is_active").unwrap_or(0);
+        info.status = if is_active == 1 { "Активна".to_string() } else { "Неактивна".to_string() };
+        info.is_pro = row.try_get("is_pro").unwrap_or(false);
+        if let Ok(sub_end) = row.try_get::<chrono::DateTime<chrono::Utc>, _>("subscription_end") {
+            // +3h to render Moscow time, matches bot's format.
+            let msk = sub_end + chrono::Duration::hours(3);
+            info.sub_end_msk = msk.format("%d.%m.%Y, %H:%M МСК").to_string();
+        }
+        info.auto_renew = row.try_get("auto_renew").unwrap_or(false);
+        info.card_last4 = row.try_get::<Option<String>, _>("card_last4").ok().flatten();
+        info.device_limit = row.try_get("device_limit").unwrap_or(0);
+    }
+
+    // Email comes from a separate table because telegram-only users have
+    // no row in user_credentials.
+    if let Ok(Some(email)) = sqlx::query_scalar::<_, String>(
+        "SELECT email FROM user_credentials WHERE telegram_id = $1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        info.email = Some(email);
+    }
+
+    // Count of user-side messages in the support_chats history — gives
+    // the admin a sense of how chatty the user has been before
+    // committing to "open ticket".
+    if let Ok(count) = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM support_chats WHERE telegram_id = $1 AND role = 'user'"
+    )
+    .bind(telegram_id)
+    .fetch_one(&pool)
+    .await
+    {
+        info.messages_in_conv = count;
+    }
+
+    info
+}
+
+fn plan_display_name(plan: &str) -> String {
+    match plan {
+        "base" => "Base",
+        "bsbase" => "BS Base",
+        "family" => "Family",
+        "bsfamily" => "BS Family",
+        "trial" => "Trial",
+        "free" => "Free",
+        "" => "—",
+        other => return other.to_string(),
+    }.to_string()
+}
+
+fn build_app_ticket_text(
+    telegram_id: i64,
+    message: &str,
+    info: &AppTicketUserInfo,
+) -> String {
+    let username_line = match info.username.as_deref() {
+        Some(u) if !u.is_empty() => format!("<b>Пользователь:</b> @{}", html_escape_local(u)),
+        _ => format!("<b>Пользователь:</b> —"),
+    };
+    let email_line = format!(
+        "<b>Email:</b> {}",
+        info.email.as_deref().map(html_escape_local).unwrap_or_else(|| "—".to_string()),
+    );
+    let card_text = info.card_last4.as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("•••• {}", s))
+        .unwrap_or_else(|| "Нет".to_string());
+
+    format!(
+        "📱 <b>ТИКЕТ ИЗ ПРИЛОЖЕНИЯ</b>\n\
+         ━━━━━━━━━━━━━━━━━━━━\n\
+         {username_line}\n\
+         <b>ID:</b> <code>{tg_id}</code>\n\
+         {email_line}\n\
+         <b>Тариф:</b> {plan}\n\
+         <b>Статус:</b> {status}\n\
+         <b>PRO:</b> {pro}\n\
+         <b>Окончание:</b> {sub_end}\n\
+         <b>Автопродление:</b> {auto_renew}\n\
+         <b>Карта:</b> {card}\n\
+         <b>Устройств:</b> {devices}\n\
+         <b>Сообщений в диалоге:</b> {msg_count}\n\
+         ━━━━━━━━━━━━━━━━━━━━\n\
+         <b>Причина:</b> Сообщение из приложения\n\n\
+         {body}",
+        username_line = username_line,
+        tg_id = telegram_id,
+        email_line = email_line,
+        plan = info.plan_display,
+        status = info.status,
+        pro = if info.is_pro { "Да" } else { "Нет" },
+        sub_end = info.sub_end_msk,
+        auto_renew = if info.auto_renew { "Да" } else { "Нет" },
+        card = card_text,
+        devices = info.device_limit,
+        msg_count = info.messages_in_conv,
+        body = html_escape_local(message),
+    )
 }
 
 fn html_escape_local(s: &str) -> String {
