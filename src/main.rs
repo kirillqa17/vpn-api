@@ -8,6 +8,7 @@ mod models;
 mod jwt;
 mod web_handlers;
 mod email;
+mod push;
 use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest, SupportChatRequest, InternalSupportChatRequest, InternalSupportEscalateRequest, AppSupportMessageResponse};
 use sqlx::Row;
 use std::collections::HashMap;
@@ -1857,6 +1858,9 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::app_support_attachment_upload)))
             .service(web::resource("/app/support/attachment/{id}")
                 .route(web::get().to(web_handlers::app_support_attachment_get)))
+            // FCM device-token registration (JWT-gated).
+            .service(web::resource("/app/register-device")
+                .route(web::post().to(web_handlers::app_register_device)))
             // Public support chat (no JWT)
             .service(web::resource("/web/support/public/history")
                 .route(web::get().to(web_handlers::public_support_history)))

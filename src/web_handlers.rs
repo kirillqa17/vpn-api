@@ -3428,6 +3428,82 @@ async fn forward_attachment_to_admin(
     Ok((file_id, kind))
 }
 
+// === Push: device-token registration ===
+
+#[derive(Deserialize)]
+pub struct RegisterDeviceRequest {
+    /// FCM registration token from the Android client.
+    pub token: String,
+    #[serde(default = "default_platform")]
+    pub platform: String,
+    #[serde(default)]
+    pub app_version: Option<String>,
+    /// Per-category opt-ins. Absent → keep existing / default true.
+    #[serde(default)]
+    pub notify_news: Option<bool>,
+    #[serde(default)]
+    pub notify_support: Option<bool>,
+}
+
+fn default_platform() -> String {
+    "android".to_string()
+}
+
+/// POST /api/app/register-device — JWT-gated. Upserts the caller's FCM
+/// token. ON CONFLICT(token) re-points the row at the current user
+/// (handles "logged out, logged in as someone else on same device") and
+/// refreshes opt-ins / app_version / updated_at.
+///
+/// Guests never reach this: the Android side only calls it once a JWT
+/// exists, and the endpoint hard-requires a valid token anyway, so the
+/// "no push for anonymous users" rule is enforced server-side too.
+pub async fn app_register_device(
+    pool: web::Data<PgPool>,
+    req: HttpRequest,
+    body: web::Json<RegisterDeviceRequest>,
+) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let token = body.token.trim();
+    if token.is_empty() {
+        return HttpResponse::BadRequest().json(json!({"error": "token required"}));
+    }
+    let platform = if body.platform == "ios" { "ios" } else { "android" };
+    let notify_news = body.notify_news.unwrap_or(true);
+    let notify_support = body.notify_support.unwrap_or(true);
+
+    let res = sqlx::query(
+        "INSERT INTO device_tokens \
+           (telegram_id, token, platform, notify_news, notify_support, app_version, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW()) \
+         ON CONFLICT (token) DO UPDATE SET \
+           telegram_id = EXCLUDED.telegram_id, \
+           platform = EXCLUDED.platform, \
+           notify_news = EXCLUDED.notify_news, \
+           notify_support = EXCLUDED.notify_support, \
+           app_version = EXCLUDED.app_version, \
+           updated_at = NOW()"
+    )
+    .bind(telegram_id)
+    .bind(token)
+    .bind(platform)
+    .bind(notify_news)
+    .bind(notify_support)
+    .bind(&body.app_version)
+    .execute(pool.get_ref())
+    .await;
+
+    match res {
+        Ok(_) => HttpResponse::Ok().json(json!({"status": "ok"})),
+        Err(e) => {
+            error!("[register_device] upsert failed for {}: {}", telegram_id, e);
+            HttpResponse::InternalServerError().json(json!({"error": "internal server error"}))
+        }
+    }
+}
+
 // === Internal support endpoints (no JWT - called by bot from Docker network) ===
 
 pub async fn internal_support_chat(
@@ -4244,6 +4320,22 @@ pub async fn admin_reply_chat(
                     warn!("[admin_reply_chat] Email notify failed for {}: {}", telegram_id, e);
                 }
             });
+            // Mobile push to that user's devices (support opt-in only).
+            // No debounce: a support reply is always worth a push, and the
+            // app dedups by chat history on open.
+            let pool_push = pool.clone();
+            let msg_push = message.clone();
+            tokio::spawn(async move {
+                let preview: String = msg_push.chars().take(120).collect();
+                crate::push::send_to_user(
+                    &pool_push,
+                    telegram_id,
+                    "Ответ поддержки",
+                    &preview,
+                    "support",
+                )
+                .await;
+            });
 
             HttpResponse::Ok().json(json!({"status": "sent", "telegram_id": telegram_id}))
         }
@@ -4621,6 +4713,18 @@ pub async fn internal_save_news(pool: web::Data<PgPool>, body: web::Json<serde_j
                 if let Err(e) = blast_news_email(&pool_clone, &text_owned).await {
                     error!("[news_blast] failed: {}", e);
                 }
+            });
+            // Mobile push to every news-opted device. Same headline/body
+            // split as the email blast so the two channels read alike.
+            let pool_push = pool.clone();
+            let text_push = text.to_string();
+            tokio::spawn(async move {
+                let mut lines = text_push.splitn(2, '\n');
+                let headline = lines.next().unwrap_or("").trim();
+                let title = if headline.is_empty() { "Новости SvoiVPN" } else { headline };
+                let body = lines.next().unwrap_or("").trim();
+                let body = if body.is_empty() { title } else { body };
+                crate::push::blast_news(&pool_push, title, body).await;
             });
             HttpResponse::Ok().json(json!({"status": "ok"}))
         }
