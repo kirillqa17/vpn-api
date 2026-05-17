@@ -299,7 +299,9 @@ async fn extend_subscription(
     let bs_squad = "9e60626e-32a8-4d91-a2f8-2aa3fecf7b23";
     let pro_squad = "b6a4e86b-b769-4c86-a2d9-f31bbe645029";
 
-    // Fetch current squads from Remnawave (additive logic)
+    // Fetch current squads from Remnawave. Unmanaged squads (e.g. Claude,
+    // admin-granted) are preserved; managed squads (default/bs/pro) are then
+    // reconciled below according to the user's actual entitlement.
     let get_response = match HTTP_CLIENT
         .get(&format!("{}/users/by-telegram-id/{}", *REMNAWAVE_API_BASE, telegram_id))
         .header("Authorization", &format!("Bearer {}", *REMNAWAVE_API_KEY))
@@ -336,9 +338,24 @@ async fn extend_subscription(
     if !squad_list.contains(&default_squad.to_string()) {
         squad_list.push(default_squad.to_string());
     }
-    // Add BS squad if buying BS plan
-    if plan.starts_with("bs") && !squad_list.contains(&bs_squad.to_string()) {
-        squad_list.push(bs_squad.to_string());
+    // BS squad is entitlement-authoritative for REAL purchasable plans only:
+    //   bsbase | bsfamily -> grant BS
+    //   base   | family   -> REVOKE BS (fixes money-leak: a regular plan must
+    //                        not keep БС-обход that was paid for on an old plan)
+    //   trial | free | _  -> leave as-is. Bonus/trial extends (ref-milestone,
+    //                        trial grant, first-purchase) pass non-purchasable
+    //                        values and MUST NOT change BS entitlement, otherwise
+    //                        a paying BS user loses БС for earning a bonus.
+    match plan.as_str() {
+        "bsbase" | "bsfamily" => {
+            if !squad_list.contains(&bs_squad.to_string()) {
+                squad_list.push(bs_squad.to_string());
+            }
+        }
+        "base" | "family" => {
+            squad_list.retain(|s| s.as_str() != bs_squad);
+        }
+        _ => {}
     }
     // Keep PRO squad if user has pro enabled
     if user.is_pro && !squad_list.contains(&pro_squad.to_string()) {
