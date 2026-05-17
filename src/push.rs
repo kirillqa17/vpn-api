@@ -35,8 +35,25 @@ fn now_secs() -> u64 {
 }
 
 fn load_service_account() -> Option<ServiceAccount> {
-    let path = std::env::var("FCM_SERVICE_ACCOUNT_PATH").ok()?;
-    let raw = std::fs::read_to_string(&path).ok()?;
+    // Preferred: the whole (minified) service-account JSON inline in
+    // FCM_SERVICE_ACCOUNT_JSON. The file's private_key uses escaped "\n"
+    // (not real newlines), so minified it's a single physical line —
+    // safe for docker `--env-file`, and survives every CI redeploy
+    // without a volume mount or workflow change. Fallback:
+    // FCM_SERVICE_ACCOUNT_PATH pointing at the JSON on disk.
+    let raw = match std::env::var("FCM_SERVICE_ACCOUNT_JSON") {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => match std::env::var("FCM_SERVICE_ACCOUNT_PATH") {
+            Ok(path) => match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("[push] service-account file read failed: {}", e);
+                    return None;
+                }
+            },
+            Err(_) => return None, // neither configured → silent no-op
+        },
+    };
     match serde_json::from_str::<ServiceAccount>(&raw) {
         Ok(sa) => Some(sa),
         Err(e) => {
