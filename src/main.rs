@@ -1795,6 +1795,8 @@ async fn main() -> std::io::Result<()> {
             // News (public)
             .service(web::resource("/web/news")
                 .route(web::get().to(web_handlers::web_get_news)))
+            .service(web::resource("/web/news/image/{id}/{idx}")
+                .route(web::get().to(web_handlers::web_get_news_image)))
             .service(web::resource("/internal/news")
                 .route(web::post().to(web_handlers::internal_save_news)))
             // Email notifications

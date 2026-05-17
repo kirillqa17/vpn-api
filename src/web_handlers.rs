@@ -4662,7 +4662,8 @@ pub async fn admin_user_referrals(pool: web::Data<PgPool>, path: web::Path<i64>,
 
 pub async fn web_get_news(pool: web::Data<PgPool>) -> HttpResponse {
     let rows = sqlx::query(
-        "SELECT id, tg_message_id, text, date, media_url FROM news_posts ORDER BY date DESC LIMIT 20"
+        "SELECT id, tg_message_id, text, date, media_url, media_file_ids \
+         FROM news_posts ORDER BY date DESC LIMIT 20"
     )
     .fetch_all(pool.get_ref())
     .await;
@@ -4670,16 +4671,94 @@ pub async fn web_get_news(pool: web::Data<PgPool>) -> HttpResponse {
     match rows {
         Ok(rows) => {
             let posts: Vec<serde_json::Value> = rows.iter().map(|r| {
+                let id = r.get::<i64, _>("id");
+                // images[] — proxied, loadable URLs (bot token stays
+                // server-side, same trick as support attachments).
+                // Empty array for text-only posts so the app renders
+                // NO image area (was an empty grey skeleton before).
+                let ids: Vec<String> = r.get::<Option<String>, _>("media_file_ids")
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+                let images: Vec<String> = (0..ids.len())
+                    .map(|i| format!("https://svoiweb.ru/api/web/news/image/{}/{}", id, i))
+                    .collect();
                 json!({
-                    "id": r.get::<i64, _>("id"),
+                    "id": id,
                     "text": r.get::<String, _>("text"),
                     "date": r.get::<chrono::DateTime<chrono::Utc>, _>("date").to_rfc3339(),
                     "media_url": r.get::<Option<String>, _>("media_url"),
+                    "images": images,
                 })
             }).collect();
             HttpResponse::Ok().json(posts)
         }
         Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) },
+    }
+}
+
+/// GET /web/news/image/{id}/{idx} — public proxy for a news photo.
+/// News is public, so no auth. Streams bytes from Telegram's file CDN
+/// using BOT_TOKEN_TG (the channel bot's token, already in this
+/// service's env) so the token never reaches the client.
+pub async fn web_get_news_image(
+    pool: web::Data<PgPool>,
+    path: web::Path<(i64, usize)>,
+) -> HttpResponse {
+    let (news_id, idx) = path.into_inner();
+    let row = sqlx::query("SELECT media_file_ids FROM news_posts WHERE id = $1")
+        .bind(news_id)
+        .fetch_optional(pool.get_ref())
+        .await;
+    let file_id = match row {
+        Ok(Some(r)) => {
+            let ids: Vec<String> = r.get::<Option<String>, _>("media_file_ids")
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            match ids.into_iter().nth(idx) {
+                Some(f) => f,
+                None => return HttpResponse::NotFound().finish(),
+            }
+        }
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => { error!("[news_image] query: {}", e); return HttpResponse::InternalServerError().finish(); }
+    };
+
+    let bot_token = match std::env::var("BOT_TOKEN_TG") {
+        Ok(v) => v,
+        Err(_) => { error!("[news_image] BOT_TOKEN_TG missing"); return HttpResponse::InternalServerError().finish(); }
+    };
+    let client = reqwest::Client::new();
+    let gf = client.post(&format!("https://api.telegram.org/bot{}/getFile", bot_token))
+        .form(&[("file_id", file_id.as_str())])
+        .send().await;
+    let file_path = match gf {
+        Ok(r) => match r.text().await {
+            Ok(t) => serde_json::from_str::<serde_json::Value>(&t).ok()
+                .and_then(|v| v.get("result").and_then(|x| x.get("file_path"))
+                    .and_then(|p| p.as_str()).map(|s| s.to_string())),
+            Err(_) => None,
+        },
+        Err(e) => { error!("[news_image] getFile: {}", e); None }
+    };
+    let file_path = match file_path {
+        Some(p) => p,
+        None => return HttpResponse::BadGateway().finish(),
+    };
+    let resp = client.get(&format!("https://api.telegram.org/file/bot{}/{}", bot_token, file_path))
+        .send().await;
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            let ct = r.headers().get("content-type")
+                .and_then(|h| h.to_str().ok()).unwrap_or("image/jpeg").to_string();
+            match r.bytes().await {
+                Ok(b) => HttpResponse::Ok()
+                    .content_type(ct)
+                    .append_header(("Cache-Control", "public, max-age=86400"))
+                    .body(b),
+                Err(_) => HttpResponse::BadGateway().finish(),
+            }
+        }
+        _ => HttpResponse::BadGateway().finish(),
     }
 }
 
@@ -4689,18 +4768,59 @@ pub async fn internal_save_news(pool: web::Data<PgPool>, body: web::Json<serde_j
     let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
     let date = body.get("date").and_then(|v| v.as_str()).unwrap_or("");
     let media_url = body.get("media_url").and_then(|v| v.as_str());
+    let photo_file_id = body.get("photo_file_id").and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let media_group_id = body.get("media_group_id").and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
 
-    if tg_message_id == 0 || text.is_empty() {
-        return HttpResponse::BadRequest().body("tg_message_id and text required");
+    // A photo-only channel post has no text — still valid news now.
+    if tg_message_id == 0 || (text.is_empty() && photo_file_id.is_none()) {
+        return HttpResponse::BadRequest().body("tg_message_id and (text or photo) required");
     }
 
+    // Album: Telegram delivers each photo of a multi-photo post as a
+    // separate channel_post update sharing media_group_id. Fold them
+    // into ONE news row — append this photo's file_id to the existing
+    // row, and backfill text if this update is the one carrying the
+    // caption. No blast for the extra photos (the first one blasted).
+    if let Some(gid) = media_group_id {
+        if let (Some(fid), Ok(Some(existing))) = (
+            photo_file_id,
+            sqlx::query("SELECT id, media_file_ids, text FROM news_posts WHERE media_group_id = $1 LIMIT 1")
+                .bind(gid).fetch_optional(pool.get_ref()).await,
+        ) {
+            let row_id: i64 = existing.get("id");
+            let cur_ids: Option<String> = existing.get("media_file_ids");
+            let cur_text: String = existing.get("text");
+            let mut ids: Vec<String> = cur_ids
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            if !ids.iter().any(|x| x == fid) { ids.push(fid.to_string()); }
+            let new_text = if cur_text.trim().is_empty() && !text.is_empty() { text } else { &cur_text };
+            let _ = sqlx::query("UPDATE news_posts SET media_file_ids = $1, text = $2 WHERE id = $3")
+                .bind(serde_json::to_string(&ids).unwrap_or_default())
+                .bind(new_text)
+                .bind(row_id)
+                .execute(pool.get_ref())
+                .await;
+            return HttpResponse::Ok().json(json!({"status": "ok", "album_appended": true}));
+        }
+    }
+
+    let media_file_ids = photo_file_id.map(|f| {
+        serde_json::to_string(&vec![f]).unwrap_or_default()
+    });
+
     let result = sqlx::query(
-        "INSERT INTO news_posts (tg_message_id, text, date, media_url) VALUES ($1, $2, $3::timestamptz, $4) ON CONFLICT (tg_message_id) DO NOTHING"
+        "INSERT INTO news_posts (tg_message_id, text, date, media_url, media_file_ids, media_group_id) \
+         VALUES ($1, $2, $3::timestamptz, $4, $5, $6) ON CONFLICT (tg_message_id) DO NOTHING"
     )
     .bind(tg_message_id)
     .bind(text)
     .bind(date)
     .bind(media_url)
+    .bind(&media_file_ids)
+    .bind(media_group_id)
     .execute(pool.get_ref())
     .await;
 
