@@ -1902,6 +1902,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::get().to(web_handlers::admin_list_tickets)))
             .service(web::resource("/admin/users")
                 .route(web::get().to(web_handlers::admin_list_users)))
+            .service(web::resource("/admin/users/{telegram_id}")
+                .route(web::get().to(web_handlers::admin_get_user)))
             .service(web::resource("/admin/users/{telegram_id}/reset-password")
                 .route(web::post().to(web_handlers::admin_reset_password)))
             .service(web::resource("/admin/tickets/open")

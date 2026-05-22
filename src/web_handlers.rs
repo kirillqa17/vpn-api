@@ -4772,6 +4772,97 @@ pub async fn admin_list_users(
     }))
 }
 
+/// Fetches the user's HWID device list from Remnawave. Non-fatal:
+/// on any failure returns an empty list so the detail page still renders.
+async fn fetch_remnawave_devices(uuid: &str) -> serde_json::Value {
+    let resp = HTTP_CLIENT
+        .get(&format!("{}/hwid/devices/{}", *REMNAWAVE_API_BASE, uuid))
+        .headers(remnawave_headers())
+        .send()
+        .await;
+    match resp {
+        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+            Ok(j) => json!({
+                "devices": j["response"]["devices"].clone(),
+                "total": j["response"]["total"].as_u64().unwrap_or(0),
+            }),
+            Err(_) => json!({ "devices": [], "total": 0 }),
+        },
+        _ => json!({ "devices": [], "total": 0 }),
+    }
+}
+
+/// Resolves the user's `referrals` id array into basic info rows.
+async fn fetch_referral_list(pool: &PgPool, user: &User) -> Vec<serde_json::Value> {
+    let ref_ids = match &user.referrals {
+        Some(ids) if !ids.is_empty() => ids.clone(),
+        _ => return vec![],
+    };
+    let rows = sqlx::query(
+        "SELECT telegram_id, username, is_active, plan, subscription_end \
+         FROM users WHERE telegram_id = ANY($1)",
+    )
+    .bind(&ref_ids)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    rows.iter().map(|r| {
+        let is_active: i32 = r.get("is_active");
+        json!({
+            "telegram_id": r.get::<i64, _>("telegram_id"),
+            "username": r.get::<Option<String>, _>("username"),
+            "plan": r.get::<String, _>("plan"),
+            "is_active": is_active > 0,
+            "subscription_end": r.try_get::<chrono::DateTime<chrono::Utc>, _>("subscription_end")
+                .map(|d| d.to_rfc3339()).unwrap_or_default(),
+        })
+    }).collect()
+}
+
+/// GET /admin/users/{telegram_id} — full user detail + devices + referrals.
+pub async fn admin_get_user(
+    pool: web::Data<PgPool>,
+    path: web::Path<i64>,
+    req: HttpRequest,
+) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
+    let telegram_id = path.into_inner();
+
+    let user: User = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(u)) => u,
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "user not found"})),
+        Err(e) => { error!("[admin_get_user] db error: {}", e);
+            return HttpResponse::InternalServerError().json(json!({"error": "internal server error"})); }
+    };
+
+    let email: Option<String> = sqlx::query_scalar::<_, String>(
+        "SELECT email FROM user_credentials WHERE telegram_id = $1",
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .ok()
+    .flatten();
+
+    let devices = fetch_remnawave_devices(&user.uuid.to_string()).await;
+    let referrals = fetch_referral_list(pool.get_ref(), &user).await;
+
+    let days_left = (user.subscription_end - Utc::now()).num_days();
+    let mut user_json = serde_json::to_value(&user).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = user_json.as_object_mut() {
+        obj.insert("days_left".into(), json!(days_left));
+        obj.insert("email".into(), json!(email));
+    }
+
+    HttpResponse::Ok().json(json!({
+        "user": user_json, "devices": devices, "referrals": referrals,
+    }))
+}
+
 // === News ===
 
 pub async fn web_get_news(pool: web::Data<PgPool>) -> HttpResponse {
