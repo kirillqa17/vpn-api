@@ -4863,6 +4863,108 @@ pub async fn admin_get_user(
     }))
 }
 
+#[derive(serde::Deserialize)]
+pub struct AdminUserPatch {
+    pub is_active: Option<bool>,
+    pub device_limit: Option<i64>,
+    pub is_pro: Option<bool>,
+    pub plan: Option<String>,
+    pub auto_renew: Option<bool>,
+}
+
+/// PATCH /admin/users/{telegram_id} — partial update of admin-safe fields.
+/// Remnawave-coupled fields sync to Remnawave first; on any Remnawave
+/// failure we return 502 before touching the DB (avoids DB/panel desync).
+pub async fn admin_update_user(
+    pool: web::Data<PgPool>,
+    path: web::Path<i64>,
+    body: web::Json<AdminUserPatch>,
+    req: HttpRequest,
+) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
+    let telegram_id = path.into_inner();
+    let p = body.into_inner();
+
+    let user: User = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(u)) => u,
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "user not found"})),
+        Err(e) => { error!("[admin_update_user] db error: {}", e);
+            return HttpResponse::InternalServerError().json(json!({"error": "internal server error"})); }
+    };
+
+    // 1. Remnawave: block / unblock.
+    if let Some(active) = p.is_active {
+        let status = if active { "ACTIVE" } else { "DISABLED" };
+        let r = HTTP_CLIENT
+            .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
+            .headers(remnawave_headers())
+            .json(&json!({ "uuid": user.uuid, "status": status }))
+            .send().await;
+        if !matches!(r, Ok(ref resp) if resp.status().is_success()) {
+            error!("[admin_update_user] Remnawave status update failed for {}", telegram_id);
+            return HttpResponse::BadGateway().json(json!({"error": "remnawave status update failed"}));
+        }
+    }
+
+    // 2. Remnawave: device limit.
+    if let Some(dl) = p.device_limit {
+        let r = HTTP_CLIENT
+            .patch(&format!("{}/users", *REMNAWAVE_API_BASE))
+            .headers(remnawave_headers())
+            .json(&json!({ "uuid": user.uuid, "hwidDeviceLimit": dl }))
+            .send().await;
+        if !matches!(r, Ok(ref resp) if resp.status().is_success()) {
+            error!("[admin_update_user] Remnawave device limit update failed for {}", telegram_id);
+            return HttpResponse::BadGateway().json(json!({"error": "remnawave device limit update failed"}));
+        }
+    }
+
+    // 3. PRO — delegate to the existing /users/{tg}/pro handler (squad sync + DB).
+    if let Some(pro) = p.is_pro {
+        let r = HTTP_CLIENT
+            .patch(&format!("http://127.0.0.1:8080/users/{}/pro", telegram_id))
+            .json(&json!({ "is_pro": pro }))
+            .send().await;
+        if !matches!(r, Ok(ref resp) if resp.status().is_success()) {
+            error!("[admin_update_user] pro toggle failed for {}", telegram_id);
+            return HttpResponse::BadGateway().json(json!({"error": "pro toggle failed"}));
+        }
+    }
+
+    // 4. DB update for the non-PRO fields.
+    let need_db = p.is_active.is_some() || p.device_limit.is_some()
+        || p.plan.is_some() || p.auto_renew.is_some();
+    if need_db {
+        let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("UPDATE users SET ");
+        let mut sep = qb.separated(", ");
+        if let Some(active) = p.is_active {
+            sep.push("is_active = ").push_bind_unseparated(if active { 1_i32 } else { 0_i32 });
+        }
+        if let Some(dl) = p.device_limit {
+            sep.push("device_limit = ").push_bind_unseparated(dl);
+        }
+        if let Some(plan) = &p.plan {
+            sep.push("plan = ").push_bind_unseparated(plan.clone());
+        }
+        if let Some(ar) = p.auto_renew {
+            sep.push("auto_renew = ").push_bind_unseparated(ar);
+        }
+        drop(sep);
+        qb.push(" WHERE telegram_id = ").push_bind(telegram_id);
+        if let Err(e) = qb.build().execute(pool.get_ref()).await {
+            error!("[admin_update_user] db update error: {}", e);
+            return HttpResponse::InternalServerError().json(json!({"error": "internal server error"}));
+        }
+    }
+
+    info!("[admin_update_user] updated user {}", telegram_id);
+    HttpResponse::Ok().json(json!({ "status": "ok" }))
+}
+
 // === News ===
 
 pub async fn web_get_news(pool: web::Data<PgPool>) -> HttpResponse {
