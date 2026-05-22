@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::jwt;
-use crate::models::{SupportChatRequest, InternalSupportChatRequest, InternalSupportEscalateRequest};
+use crate::models::{User, SupportChatRequest, InternalSupportChatRequest, InternalSupportEscalateRequest};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -4655,6 +4655,120 @@ pub async fn admin_user_referrals(pool: web::Data<PgPool>, path: web::Path<i64>,
         "referrals_count": refs_count,
         "payed_refs_count": payed_refs,
         "referrals": referral_list,
+    }))
+}
+
+// === Admin user list ===
+
+#[derive(serde::Deserialize)]
+pub struct UserListQuery {
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+    pub q: Option<String>,
+    pub plan: Option<String>,
+    pub status: Option<String>,
+    pub expiring: Option<i64>,
+    pub is_pro: Option<bool>,
+    pub auto_renew: Option<bool>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+}
+
+/// Pushes the shared ` WHERE ...` filter clauses onto a QueryBuilder.
+/// Used by both the COUNT query and the page query so they stay in sync.
+fn push_user_filters(qb: &mut sqlx::QueryBuilder<sqlx::Postgres>, q: &UserListQuery) {
+    qb.push(" WHERE 1=1");
+    if let Some(term) = q.q.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        qb.push(" AND (u.username ILIKE ").push_bind(format!("%{}%", term));
+        qb.push(" OR uc.email ILIKE ").push_bind(format!("%{}%", term));
+        if let Ok(id) = term.parse::<i64>() {
+            qb.push(" OR u.telegram_id = ").push_bind(id);
+        }
+        qb.push(")");
+    }
+    if let Some(plan) = q.plan.as_ref().filter(|s| !s.is_empty()) {
+        qb.push(" AND u.plan = ").push_bind(plan.clone());
+    }
+    match q.status.as_deref() {
+        Some("active") => { qb.push(" AND u.is_active > 0"); }
+        Some("inactive") => { qb.push(" AND u.is_active = 0"); }
+        _ => {}
+    }
+    if let Some(days) = q.expiring {
+        qb.push(" AND u.is_active > 0 AND u.subscription_end BETWEEN NOW() AND NOW() + ")
+          .push_bind(days)
+          .push(" * INTERVAL '1 day'");
+    }
+    if let Some(pro) = q.is_pro {
+        qb.push(" AND u.is_pro = ").push_bind(pro);
+    }
+    if let Some(ar) = q.auto_renew {
+        qb.push(" AND u.auto_renew = ").push_bind(ar);
+    }
+}
+
+/// GET /admin/users — paginated, filterable user list.
+pub async fn admin_list_users(
+    pool: web::Data<PgPool>,
+    query: web::Query<UserListQuery>,
+    req: HttpRequest,
+) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
+    let q = query.into_inner();
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(20).clamp(1, 100);
+    let offset = (page - 1) * page_size;
+
+    // Column name is whitelisted (never bound) — safe to interpolate.
+    let sort_col = match q.sort.as_deref() {
+        Some("subscription_end") => "u.subscription_end",
+        _ => "u.created_at",
+    };
+    let order = match q.order.as_deref() {
+        Some("asc") => "ASC",
+        _ => "DESC",
+    };
+
+    let mut count_qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT COUNT(*) FROM users u LEFT JOIN user_credentials uc ON uc.telegram_id = u.telegram_id",
+    );
+    push_user_filters(&mut count_qb, &q);
+    let total: i64 = match count_qb.build_query_scalar().fetch_one(pool.get_ref()).await {
+        Ok(t) => t,
+        Err(e) => { error!("[admin_list_users] count error: {}", e);
+            return HttpResponse::InternalServerError().json(json!({"error": "internal server error"})); }
+    };
+
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT u.* FROM users u LEFT JOIN user_credentials uc ON uc.telegram_id = u.telegram_id",
+    );
+    push_user_filters(&mut qb, &q);
+    qb.push(" ORDER BY ").push(sort_col).push(" ").push(order);
+    qb.push(" LIMIT ").push_bind(page_size).push(" OFFSET ").push_bind(offset);
+
+    let users: Vec<User> = match qb.build_query_as::<User>().fetch_all(pool.get_ref()).await {
+        Ok(u) => u,
+        Err(e) => { error!("[admin_list_users] query error: {}", e);
+            return HttpResponse::InternalServerError().json(json!({"error": "internal server error"})); }
+    };
+
+    let now = Utc::now();
+    let items: Vec<serde_json::Value> = users.iter().map(|u| json!({
+        "telegram_id": u.telegram_id,
+        "username": u.username,
+        "plan": u.plan,
+        "is_active": u.is_active,
+        "is_pro": u.is_pro,
+        "subscription_end": u.subscription_end.to_rfc3339(),
+        "days_left": (u.subscription_end - now).num_days(),
+        "device_limit": u.device_limit,
+        "auto_renew": u.auto_renew,
+        "created_at": u.created_at.to_rfc3339(),
+    })).collect();
+
+    info!("[admin_list_users] page {} returned {}/{}", page, items.len(), total);
+    HttpResponse::Ok().json(json!({
+        "items": items, "total": total, "page": page, "page_size": page_size,
     }))
 }
 
