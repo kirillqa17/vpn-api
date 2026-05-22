@@ -4965,6 +4965,72 @@ pub async fn admin_update_user(
     HttpResponse::Ok().json(json!({ "status": "ok" }))
 }
 
+/// GET /admin/stats — aggregate dashboard metrics.
+pub async fn admin_stats(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
+
+    let counts = sqlx::query(
+        "SELECT \
+            COUNT(*) AS total, \
+            COUNT(*) FILTER (WHERE is_active > 0) AS active, \
+            COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 day') AS d1, \
+            COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') AS d7, \
+            COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '30 days') AS d30, \
+            COUNT(*) FILTER (WHERE is_active > 0 \
+                AND subscription_end BETWEEN NOW() AND NOW() + INTERVAL '7 days') AS expiring, \
+            COUNT(*) FILTER (WHERE is_used_trial = true) AS trial_used \
+         FROM users",
+    )
+    .fetch_one(pool.get_ref())
+    .await;
+
+    let counts = match counts {
+        Ok(r) => r,
+        Err(e) => { error!("[admin_stats] counts error: {}", e);
+            return HttpResponse::InternalServerError().json(json!({"error": "internal server error"})); }
+    };
+
+    let plan_rows = sqlx::query("SELECT plan, COUNT(*) AS cnt FROM users GROUP BY plan ORDER BY cnt DESC")
+        .fetch_all(pool.get_ref()).await.unwrap_or_default();
+    let plan_distribution: Vec<serde_json::Value> = plan_rows.iter().map(|r| json!({
+        "plan": r.get::<String, _>("plan"),
+        "count": r.get::<i64, _>("cnt"),
+    })).collect();
+
+    let platform_rows = sqlx::query(
+        "SELECT platform, COUNT(*) AS cnt FROM device_tokens GROUP BY platform ORDER BY cnt DESC",
+    ).fetch_all(pool.get_ref()).await.unwrap_or_default();
+    let platform_split: Vec<serde_json::Value> = platform_rows.iter().map(|r| json!({
+        "platform": r.get::<String, _>("platform"),
+        "count": r.get::<i64, _>("cnt"),
+    })).collect();
+
+    let signup_rows = sqlx::query(
+        "SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, COUNT(*) AS cnt \
+         FROM users WHERE created_at > NOW() - INTERVAL '30 days' \
+         GROUP BY day ORDER BY day",
+    ).fetch_all(pool.get_ref()).await.unwrap_or_default();
+    let signups_30d: Vec<serde_json::Value> = signup_rows.iter().map(|r| json!({
+        "date": r.get::<String, _>("day"),
+        "count": r.get::<i64, _>("cnt"),
+    })).collect();
+
+    HttpResponse::Ok().json(json!({
+        "total_users":  counts.get::<i64, _>("total"),
+        "active_users": counts.get::<i64, _>("active"),
+        "new_signups": {
+            "d1":  counts.get::<i64, _>("d1"),
+            "d7":  counts.get::<i64, _>("d7"),
+            "d30": counts.get::<i64, _>("d30"),
+        },
+        "expiring_7d":  counts.get::<i64, _>("expiring"),
+        "trial_used":   counts.get::<i64, _>("trial_used"),
+        "plan_distribution": plan_distribution,
+        "platform_split": platform_split,
+        "signups_30d": signups_30d,
+    }))
+}
+
 // === News ===
 
 pub async fn web_get_news(pool: web::Data<PgPool>) -> HttpResponse {
