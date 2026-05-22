@@ -4991,7 +4991,8 @@ pub async fn admin_stats(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespo
     };
 
     let plan_rows = sqlx::query("SELECT plan, COUNT(*) AS cnt FROM users GROUP BY plan ORDER BY cnt DESC")
-        .fetch_all(pool.get_ref()).await.unwrap_or_default();
+        .fetch_all(pool.get_ref()).await
+        .unwrap_or_else(|e| { warn!("[admin_stats] plan distribution query failed: {}", e); Vec::new() });
     let plan_distribution: Vec<serde_json::Value> = plan_rows.iter().map(|r| json!({
         "plan": r.get::<String, _>("plan"),
         "count": r.get::<i64, _>("cnt"),
@@ -4999,17 +5000,20 @@ pub async fn admin_stats(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespo
 
     let platform_rows = sqlx::query(
         "SELECT platform, COUNT(*) AS cnt FROM device_tokens GROUP BY platform ORDER BY cnt DESC",
-    ).fetch_all(pool.get_ref()).await.unwrap_or_default();
+    ).fetch_all(pool.get_ref()).await
+        .unwrap_or_else(|e| { warn!("[admin_stats] platform split query failed: {}", e); Vec::new() });
     let platform_split: Vec<serde_json::Value> = platform_rows.iter().map(|r| json!({
         "platform": r.get::<String, _>("platform"),
         "count": r.get::<i64, _>("cnt"),
     })).collect();
 
+    // Sparse series: only days with >=1 signup appear; the chart fills gaps.
     let signup_rows = sqlx::query(
         "SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, COUNT(*) AS cnt \
          FROM users WHERE created_at > NOW() - INTERVAL '30 days' \
          GROUP BY day ORDER BY day",
-    ).fetch_all(pool.get_ref()).await.unwrap_or_default();
+    ).fetch_all(pool.get_ref()).await
+        .unwrap_or_else(|e| { warn!("[admin_stats] signups query failed: {}", e); Vec::new() });
     let signups_30d: Vec<serde_json::Value> = signup_rows.iter().map(|r| json!({
         "date": r.get::<String, _>("day"),
         "count": r.get::<i64, _>("cnt"),
