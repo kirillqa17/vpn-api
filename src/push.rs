@@ -185,10 +185,11 @@ async fn dispatch(
     title: &str,
     body: &str,
     category: &str,
-) {
+) -> usize {
     if rows.is_empty() {
-        return;
+        return 0;
     }
+    let rows_len = rows.len();
     let sa = match load_service_account() {
         Some(s) => s,
         None => {
@@ -198,14 +199,14 @@ async fn dispatch(
                 rows.len(),
                 category
             );
-            return;
+            return 0;
         }
     };
     let access = match access_token(&sa).await {
         Ok(t) => t,
         Err(e) => {
             log::error!("[push] could not get access token: {}", e);
-            return;
+            return 0;
         }
     };
     let mut ok = 0usize;
@@ -225,7 +226,8 @@ async fn dispatch(
             }
         }
     }
-    log::info!("[push] {} {}/{} delivered", category, ok, ok);
+    log::info!("[push] {} {}/{} delivered", category, ok, rows_len);
+    ok
 }
 
 /// Push to every device of one user, gated by the per-category opt-in.
@@ -271,4 +273,10 @@ pub async fn blast_news(pool: &PgPool, title: &str, body: &str) {
         }
     };
     dispatch(pool, rows, title, body, "news").await;
+}
+
+/// Fan a broadcast out to a pre-resolved set of device tokens.
+/// Returns the number of pushes FCM accepted.
+pub async fn blast_tokens(pool: &PgPool, tokens: Vec<String>, title: &str, body: &str) -> usize {
+    dispatch(pool, tokens, title, body, "news").await
 }
