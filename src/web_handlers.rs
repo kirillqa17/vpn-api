@@ -5035,6 +5035,121 @@ pub async fn admin_stats(pool: web::Data<PgPool>, req: HttpRequest) -> HttpRespo
     }))
 }
 
+/// Resolves a broadcast `segment` JSON to the matching device-token list.
+/// All segments are gated by notify_news = TRUE.
+async fn resolve_segment_tokens(pool: &PgPool, segment: &serde_json::Value) -> Vec<String> {
+    let seg_type = segment.get("type").and_then(|v| v.as_str()).unwrap_or("all");
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT dt.token FROM device_tokens dt");
+    match seg_type {
+        "expiring" => {
+            let days = segment.get("days").and_then(|v| v.as_i64()).unwrap_or(7);
+            qb.push(" JOIN users u ON u.telegram_id = dt.telegram_id \
+                      WHERE dt.notify_news = TRUE AND u.is_active > 0 \
+                      AND u.subscription_end BETWEEN NOW() AND NOW() + ");
+            qb.push_bind(days).push(" * INTERVAL '1 day'");
+        }
+        "plan" => {
+            let plan = segment.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            qb.push(" JOIN users u ON u.telegram_id = dt.telegram_id \
+                      WHERE dt.notify_news = TRUE AND u.plan = ");
+            qb.push_bind(plan);
+        }
+        "inactive" => {
+            qb.push(" JOIN users u ON u.telegram_id = dt.telegram_id \
+                      WHERE dt.notify_news = TRUE AND u.is_active = 0");
+        }
+        _ => { qb.push(" WHERE dt.notify_news = TRUE"); }
+    }
+    match qb.build().fetch_all(pool).await {
+        Ok(rows) => rows.iter().map(|r| r.get::<String, _>("token")).collect(),
+        Err(e) => { error!("[broadcast] segment query failed: {}", e); Vec::new() }
+    }
+}
+
+/// POST /admin/broadcast/preview — recipient count for a segment.
+pub async fn admin_broadcast_preview(
+    pool: web::Data<PgPool>,
+    body: web::Json<serde_json::Value>,
+    req: HttpRequest,
+) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
+    let segment = body.get("segment").cloned().unwrap_or_else(|| json!({"type": "all"}));
+    let tokens = resolve_segment_tokens(pool.get_ref(), &segment).await;
+    HttpResponse::Ok().json(json!({"count": tokens.len()}))
+}
+
+/// POST /admin/broadcast — send a broadcast (FCM fan-out runs in the background).
+pub async fn admin_broadcast(
+    pool: web::Data<PgPool>,
+    body: web::Json<serde_json::Value>,
+    req: HttpRequest,
+) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
+    let title = body.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let text = body.get("body").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let segment = body.get("segment").cloned().unwrap_or_else(|| json!({"type": "all"}));
+    if title.is_empty() || text.is_empty() {
+        return HttpResponse::BadRequest().json(json!({"error": "title and body are required"}));
+    }
+
+    let tokens = resolve_segment_tokens(pool.get_ref(), &segment).await;
+    let recipients = tokens.len() as i32;
+
+    let id: i64 = match sqlx::query_scalar::<_, i64>(
+        "INSERT INTO broadcasts (admin_label, title, body, segment, recipients, delivered, status) \
+         VALUES ('admin', $1, $2, $3::jsonb, $4, 0, 'sending') RETURNING id",
+    )
+    .bind(&title)
+    .bind(&text)
+    .bind(segment.to_string())
+    .bind(recipients)
+    .fetch_one(pool.get_ref())
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => { error!("[admin_broadcast] insert failed: {}", e);
+            return HttpResponse::InternalServerError().json(json!({"error": "internal server error"})); }
+    };
+
+    // Background FCM fan-out: the admin's request returns immediately.
+    let pool2 = pool.clone();
+    tokio::spawn(async move {
+        let delivered = crate::push::blast_tokens(&pool2, tokens, &title, &text).await as i32;
+        let _ = sqlx::query("UPDATE broadcasts SET delivered = $1, status = 'sent' WHERE id = $2")
+            .bind(delivered)
+            .bind(id)
+            .execute(pool2.get_ref())
+            .await;
+        info!("[admin_broadcast] #{} delivered {}/{}", id, delivered, recipients);
+    });
+
+    HttpResponse::Ok().json(json!({"id": id, "recipients": recipients, "status": "sending"}))
+}
+
+/// GET /admin/broadcasts — broadcast history, newest first.
+pub async fn admin_list_broadcasts(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
+    if let Some(resp) = check_admin_key(&req) { return resp; }
+    let rows = sqlx::query(
+        "SELECT id, title, body, segment::text AS segment, recipients, delivered, status, created_at \
+         FROM broadcasts ORDER BY created_at DESC LIMIT 100",
+    )
+    .fetch_all(pool.get_ref())
+    .await
+    .unwrap_or_else(|e| { error!("[admin_list_broadcasts] query failed: {}", e); Vec::new() });
+    let items: Vec<serde_json::Value> = rows.iter().map(|r| json!({
+        "id": r.get::<i64, _>("id"),
+        "title": r.get::<String, _>("title"),
+        "body": r.get::<String, _>("body"),
+        "segment": serde_json::from_str::<serde_json::Value>(&r.get::<String, _>("segment"))
+            .unwrap_or_else(|_| json!({})),
+        "recipients": r.get::<i32, _>("recipients"),
+        "delivered": r.get::<i32, _>("delivered"),
+        "status": r.get::<String, _>("status"),
+        "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
+    })).collect();
+    HttpResponse::Ok().json(json!({"items": items}))
+}
+
 // === News ===
 
 pub async fn web_get_news(pool: web::Data<PgPool>) -> HttpResponse {
