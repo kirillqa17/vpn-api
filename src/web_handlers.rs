@@ -2446,6 +2446,51 @@ pub async fn public_push_subscribe(
     }
 }
 
+#[derive(Deserialize)]
+pub struct AuthedPushSubscribeRequest {
+    pub subscription: PushSubscriptionPayload,
+    pub user_agent: Option<String>,
+}
+
+pub async fn push_subscribe(
+    pool: web::Data<PgPool>,
+    req: HttpRequest,
+    body: web::Json<AuthedPushSubscribeRequest>,
+) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    let res = sqlx::query(
+        "INSERT INTO web_push_subscriptions (telegram_id, endpoint, p256dh, auth, user_agent) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (endpoint) DO UPDATE SET \
+            telegram_id = EXCLUDED.telegram_id, \
+            p256dh = EXCLUDED.p256dh, \
+            auth = EXCLUDED.auth, \
+            user_agent = EXCLUDED.user_agent",
+    )
+    .bind(telegram_id)
+    .bind(&body.subscription.endpoint)
+    .bind(&body.subscription.keys.p256dh)
+    .bind(&body.subscription.keys.auth)
+    .bind(body.user_agent.as_deref())
+    .execute(pool.get_ref())
+    .await;
+
+    match res {
+        Ok(_) => {
+            info!("[push_subscribe] saved sub for tg={}", telegram_id);
+            HttpResponse::Ok().json(json!({"status": "subscribed"}))
+        }
+        Err(e) => {
+            error!("[push_subscribe] DB error: {}", e);
+            HttpResponse::InternalServerError().json(json!({"error": "db error"}))
+        }
+    }
+}
+
 pub async fn web_support_escalate(
     pool: web::Data<PgPool>,
     req: HttpRequest,

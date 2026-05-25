@@ -1868,6 +1868,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::web_support_chat)))
             .service(web::resource("/web/support/escalate")
                 .route(web::post().to(web_handlers::web_support_escalate)))
+            .service(web::resource("/web/support/push/subscribe")
+                .route(web::post().to(web_handlers::push_subscribe)))
             .service(web::resource("/app/support/message")
                 .route(web::post().to(web_handlers::app_support_message)))
             // Attachment endpoints — upload (multipart) and proxy-fetch.
