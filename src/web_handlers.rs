@@ -4152,7 +4152,14 @@ pub async fn app_bug_report(body: web::Json<serde_json::Value>) -> HttpResponse 
 }
 
 pub async fn internal_set_maintenance(pool: web::Data<PgPool>, body: web::Json<serde_json::Value>, req: HttpRequest) -> HttpResponse {
-    if let Some(resp) = check_internal_key(&req) { return resp; }
+    // Accept either internal (tech-support-bot) or admin (web admin panel) key.
+    // The admin panel calls this endpoint from svoiweb.ru/admin/system, see
+    // vpn-admin/src/api.ts setMaintenance().
+    let has_internal = check_internal_key(&req).is_none();
+    let has_admin = check_admin_key(&req).is_none();
+    if !has_internal && !has_admin {
+        return HttpResponse::Forbidden().json(json!({"error": "forbidden"}));
+    }
     let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
     let value = if enabled { "true" } else { "false" };
 
