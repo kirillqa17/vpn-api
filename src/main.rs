@@ -9,6 +9,7 @@ mod jwt;
 mod web_handlers;
 mod email;
 mod push;
+mod push_web;
 use models::{User, NewUser, AddReferralData, ExtendSubscriptionRequest, ExpiringUser, PromoCode, CreatePromoRequest, ValidatePromoRequest, UsePromoRequest, SavePaymentMethodRequest, ToggleAutoRenewRequest, AutoRenewUser, AutoRenewAttemptRequest, ToggleProRequest, SupportChatRequest, InternalSupportChatRequest, InternalSupportEscalateRequest, AppSupportMessageResponse};
 use sqlx::Row;
 use std::collections::HashMap;
