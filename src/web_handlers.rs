@@ -2385,6 +2385,67 @@ pub async fn public_support_escalate(
     HttpResponse::Ok().json(json!({"status": "escalated"}))
 }
 
+#[derive(Deserialize)]
+pub struct PushSubscribeRequest {
+    pub session_id: String,
+    pub subscription: PushSubscriptionPayload,
+    pub user_agent: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PushSubscriptionPayload {
+    pub endpoint: String,
+    pub keys: PushKeys,
+}
+
+#[derive(Deserialize)]
+pub struct PushKeys {
+    pub p256dh: String,
+    pub auth: String,
+}
+
+pub async fn public_push_subscribe(
+    pool: web::Data<PgPool>,
+    body: web::Json<PushSubscribeRequest>,
+) -> HttpResponse {
+    let session_id = body.session_id.trim();
+    if session_id.is_empty() {
+        return HttpResponse::BadRequest().json(json!({"error": "session_id required"}));
+    }
+    let telegram_id = session_to_telegram_id(session_id);
+
+    let res = sqlx::query(
+        "INSERT INTO web_push_subscriptions (telegram_id, endpoint, p256dh, auth, user_agent) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (endpoint) DO UPDATE SET \
+            telegram_id = EXCLUDED.telegram_id, \
+            p256dh = EXCLUDED.p256dh, \
+            auth = EXCLUDED.auth, \
+            user_agent = EXCLUDED.user_agent",
+    )
+    .bind(telegram_id)
+    .bind(&body.subscription.endpoint)
+    .bind(&body.subscription.keys.p256dh)
+    .bind(&body.subscription.keys.auth)
+    .bind(body.user_agent.as_deref())
+    .execute(pool.get_ref())
+    .await;
+
+    match res {
+        Ok(_) => {
+            info!(
+                "[public_push_subscribe] saved sub for session_id={} tg={}",
+                session_id, telegram_id
+            );
+            HttpResponse::Ok().json(json!({"status": "subscribed"}))
+        }
+        Err(e) => {
+            error!("[public_push_subscribe] DB error: {}", e);
+            HttpResponse::InternalServerError().json(json!({"error": "db error"}))
+        }
+    }
+}
+
 pub async fn web_support_escalate(
     pool: web::Data<PgPool>,
     req: HttpRequest,

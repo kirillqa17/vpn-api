@@ -1888,6 +1888,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::public_support_chat)))
             .service(web::resource("/web/support/public/escalate")
                 .route(web::post().to(web_handlers::public_support_escalate)))
+            .service(web::resource("/web/support/public/push/subscribe")
+                .route(web::post().to(web_handlers::public_push_subscribe)))
             // Admin endpoints
             .service(web::resource("/admin/chats")
                 .route(web::get().to(web_handlers::admin_list_chats)))
