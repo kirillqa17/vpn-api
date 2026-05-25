@@ -21,3 +21,10 @@ CREATE TABLE IF NOT EXISTS web_push_subscriptions (
 -- Send path: SELECT every subscription for that user.
 CREATE INDEX IF NOT EXISTS idx_wps_telegram_id
     ON web_push_subscriptions (telegram_id);
+
+-- vpn-api connects as api_user (not postgres superuser), so the role
+-- needs explicit row/sequence permissions or every INSERT returns
+-- "permission denied". Same pattern would apply to device_tokens
+-- (007), which currently has the same bug in prod — TODO follow-up.
+GRANT SELECT, INSERT, UPDATE, DELETE ON web_push_subscriptions TO api_user;
+GRANT USAGE, SELECT ON web_push_subscriptions_id_seq TO api_user;
