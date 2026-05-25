@@ -4442,6 +4442,19 @@ pub async fn admin_reply_chat(
                 )
                 .await;
             });
+            // Web Push (browser) — fire-and-forget, prune dead endpoints inside push_web.
+            let pool_web = pool.clone();
+            let msg_web = message.clone();
+            tokio::spawn(async move {
+                let preview: String = msg_web.chars().take(120).collect();
+                crate::push_web::send_to_telegram_id(
+                    (**pool_web).clone(),
+                    telegram_id,
+                    "SvoiVPN — оператор ответил".to_string(),
+                    preview,
+                )
+                .await;
+            });
 
             HttpResponse::Ok().json(json!({"status": "sent", "telegram_id": telegram_id}))
         }
