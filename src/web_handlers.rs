@@ -740,6 +740,189 @@ pub async fn auth_telegram_confirm(
     }
 }
 
+/// Claim an existing email-only synthetic account and merge it into the
+/// currently-logged-in Telegram account.
+///
+/// Why this exists: users who already had a Telegram-bound account sometimes
+/// went to the website on another device, saw the Регистрация screen and
+/// created an "email account" with their email — that flow created a NEW
+/// synthetic-id user instead of linking. They then end up with two accounts
+/// (real TG + empty synthetic). This endpoint lets them recover by proving
+/// they own the email (password) and merging it back into their TG account.
+///
+/// Auth: JWT (real Telegram telegram_id, must be > 0).
+/// Body: { email, password }
+/// On success: user_credentials.telegram_id is repointed to the real TG id,
+/// the later subscription_end wins, the synthetic user is deleted from DB
+/// and from Remnawave.
+pub async fn auth_claim_email(
+    pool: web::Data<PgPool>,
+    req: HttpRequest,
+    data: web::Json<EmailLoginRequest>,
+) -> HttpResponse {
+    let real_tg = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    if real_tg <= 0 {
+        return HttpResponse::BadRequest().json(json!({
+            "error": "Эта функция только для Telegram-аккаунтов. Войдите через Telegram."
+        }));
+    }
+
+    let email = data.email.trim().to_lowercase();
+    if !email.contains('@') {
+        return HttpResponse::BadRequest().json(json!({"error": "Invalid email"}));
+    }
+
+    // 1. Look up the credentials row.
+    let cred = match sqlx::query(
+        "SELECT telegram_id, password_hash, email_verified FROM user_credentials WHERE email = $1"
+    )
+    .bind(&email)
+    .fetch_optional(pool.get_ref())
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::NotFound().json(json!({
+            "error": "Email не найден. Создайте аккаунт или проверьте написание."
+        })),
+        Err(e) => { error!("[claim_email] db lookup: {}", e); return HttpResponse::InternalServerError().json(json!({"error": "internal"})); }
+    };
+
+    let synthetic_tg: i64 = cred.get("telegram_id");
+    let stored_hash: String = cred.get("password_hash");
+
+    // 2. Only synthetic (negative) IDs can be claimed. A positive-id link means
+    // the email is already attached to a real Telegram account — refuse, to
+    // prevent account takeover.
+    if synthetic_tg >= 0 {
+        return HttpResponse::Conflict().json(json!({
+            "error": "Email уже привязан к Telegram-аккаунту. Если это не вы — обратитесь в поддержку."
+        }));
+    }
+
+    // 3. The current real TG user must not already have a linked email — one
+    // email per TG account is the model.
+    let has_email = sqlx::query("SELECT id FROM user_credentials WHERE telegram_id = $1")
+        .bind(real_tg)
+        .fetch_optional(pool.get_ref())
+        .await;
+    if let Ok(Some(_)) = has_email {
+        return HttpResponse::Conflict().json(json!({
+            "error": "К вашему аккаунту уже привязан email. Отвяжите его сначала в настройках."
+        }));
+    }
+
+    // 4. Verify the password — proves they really own the synthetic.
+    use argon2::{Argon2, PasswordVerifier};
+    use argon2::password_hash::PasswordHash;
+    let parsed_hash = match PasswordHash::new(&stored_hash) {
+        Ok(h) => h,
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"error": "internal"})),
+    };
+    if Argon2::default().verify_password(data.password.as_bytes(), &parsed_hash).is_err() {
+        return HttpResponse::Unauthorized().json(json!({"error": "Неверный пароль"}));
+    }
+
+    // 5. Read both users' subscription state so we can merge.
+    let real_row = sqlx::query(
+        "SELECT subscription_end, is_active, device_limit FROM users WHERE telegram_id = $1"
+    )
+    .bind(real_tg)
+    .fetch_optional(pool.get_ref())
+    .await
+    .ok()
+    .flatten();
+    let synth_row = sqlx::query(
+        "SELECT uuid, subscription_end, is_active, device_limit FROM users WHERE telegram_id = $1"
+    )
+    .bind(synthetic_tg)
+    .fetch_optional(pool.get_ref())
+    .await;
+    let synth_row = match synth_row {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            // Orphan credentials with no users row — just repoint and we're done.
+            let _ = sqlx::query("UPDATE user_credentials SET telegram_id = $1 WHERE telegram_id = $2")
+                .bind(real_tg).bind(synthetic_tg)
+                .execute(pool.get_ref())
+                .await;
+            return HttpResponse::Ok().json(json!({"status": "claimed", "merged_subscription": false}));
+        }
+        Err(e) => { error!("[claim_email] db fetch synth: {}", e); return HttpResponse::InternalServerError().json(json!({"error": "internal"})); }
+    };
+    let synth_uuid: uuid::Uuid = synth_row.get("uuid");
+    let synth_sub_end: chrono::DateTime<chrono::Utc> = synth_row.get("subscription_end");
+    let synth_active: i32 = synth_row.get("is_active");
+    let synth_dev: i64 = synth_row.get("device_limit");
+
+    let (real_sub_end, real_active, real_dev) = match real_row {
+        Some(r) => (
+            r.get::<chrono::DateTime<chrono::Utc>, _>("subscription_end"),
+            r.get::<i32, _>("is_active"),
+            r.get::<i64, _>("device_limit"),
+        ),
+        None => return HttpResponse::NotFound().json(json!({"error": "Ваш Telegram-аккаунт не найден в БД, обратитесь в поддержку"})),
+    };
+
+    // 6. Apply the merge inside a transaction.
+    let mut tx = match pool.begin().await {
+        Ok(t) => t,
+        Err(e) => { error!("[claim_email] tx begin: {}", e); return HttpResponse::InternalServerError().json(json!({"error": "internal"})); }
+    };
+
+    // Take whichever is the more generous on each field.
+    let merged_sub_end = if synth_sub_end > real_sub_end { synth_sub_end } else { real_sub_end };
+    let merged_active = std::cmp::max(synth_active, real_active);
+    let merged_dev = std::cmp::max(synth_dev, real_dev);
+
+    if let Err(e) = sqlx::query(
+        "UPDATE users SET subscription_end = $1, is_active = $2, device_limit = $3 WHERE telegram_id = $4"
+    )
+    .bind(merged_sub_end).bind(merged_active).bind(merged_dev).bind(real_tg)
+    .execute(&mut *tx).await {
+        error!("[claim_email] update real user: {}", e);
+        return HttpResponse::InternalServerError().json(json!({"error": "internal"}));
+    }
+
+    if let Err(e) = sqlx::query("UPDATE user_credentials SET telegram_id = $1 WHERE telegram_id = $2")
+        .bind(real_tg).bind(synthetic_tg)
+        .execute(&mut *tx).await {
+        error!("[claim_email] repoint creds: {}", e);
+        return HttpResponse::InternalServerError().json(json!({"error": "internal"}));
+    }
+
+    if let Err(e) = sqlx::query("DELETE FROM users WHERE telegram_id = $1")
+        .bind(synthetic_tg)
+        .execute(&mut *tx).await {
+        error!("[claim_email] delete synth user: {}", e);
+        return HttpResponse::InternalServerError().json(json!({"error": "internal"}));
+    }
+
+    if let Err(e) = tx.commit().await {
+        error!("[claim_email] tx commit: {}", e);
+        return HttpResponse::InternalServerError().json(json!({"error": "internal"}));
+    }
+
+    // 7. Best-effort delete from Remnawave (outside tx — non-critical).
+    let _ = HTTP_CLIENT
+        .delete(&format!("{}/users/{}", *REMNAWAVE_API_BASE, synth_uuid))
+        .headers(remnawave_headers())
+        .send()
+        .await;
+
+    info!(
+        "[claim_email] Merged synthetic {} (email={}) into real TG {}; sub_end={}, active={}, dev={}",
+        synthetic_tg, email, real_tg, merged_sub_end, merged_active, merged_dev
+    );
+    HttpResponse::Ok().json(json!({
+        "status": "claimed",
+        "merged_subscription": true,
+        "subscription_end": merged_sub_end,
+    }))
+}
+
 pub async fn auth_link_email(
     pool: web::Data<PgPool>,
     req: HttpRequest,

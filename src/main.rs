@@ -1788,6 +1788,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::auth_email_login)))
             .service(web::resource("/web/auth/link-email")
                 .route(web::post().to(web_handlers::auth_link_email)))
+            .service(web::resource("/web/auth/claim-email")
+                .route(web::post().to(web_handlers::auth_claim_email)))
             .service(web::resource("/web/auth/verify-email")
                 .route(web::post().to(web_handlers::auth_verify_email)))
             .service(web::resource("/web/auth/forgot-password")
