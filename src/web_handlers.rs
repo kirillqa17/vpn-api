@@ -2300,7 +2300,7 @@ pub async fn web_support_chat(
         .header("Authorization", format!("Bearer {}", *PROXYAPI_KEY))
         .header("Content-Type", "application/json")
         .json(&json!({
-            "model": "gemini/gemini-2.0-flash",
+            "model": "gemini/gemini-2.5-flash",
             "temperature": 0.3,
             "messages": messages
         }))
@@ -2314,7 +2314,7 @@ pub async fn web_support_chat(
             match HTTP_CLIENT.post(format!("{}/chat/completions", *PROXYAPI_BASE_URL))
                 .header("Authorization", format!("Bearer {}", *PROXYAPI_KEY))
                 .header("Content-Type", "application/json")
-                .json(&serde_json::json!({"model":"gemini/gemini-2.0-flash","temperature":0.3,"messages":messages}))
+                .json(&serde_json::json!({"model":"gemini/gemini-2.5-flash","temperature":0.3,"messages":messages}))
                 .send().await {
                 Ok(resp) if resp.status().is_success() => resp.json::<serde_json::Value>().await
                     .map(|v| v["choices"][0]["message"]["content"].as_str().unwrap_or("Извините, не удалось получить ответ.").to_string())
@@ -2329,7 +2329,7 @@ pub async fn web_support_chat(
             match HTTP_CLIENT.post(format!("{}/chat/completions", *PROXYAPI_BASE_URL))
                 .header("Authorization", format!("Bearer {}", *PROXYAPI_KEY))
                 .header("Content-Type", "application/json")
-                .json(&serde_json::json!({"model":"gemini/gemini-2.0-flash","temperature":0.3,"messages":messages}))
+                .json(&serde_json::json!({"model":"gemini/gemini-2.5-flash","temperature":0.3,"messages":messages}))
                 .send().await {
                 Ok(resp) if resp.status().is_success() => resp.json::<serde_json::Value>().await
                     .map(|v| v["choices"][0]["message"]["content"].as_str().unwrap_or("Извините, не удалось получить ответ.").to_string())
@@ -2474,7 +2474,7 @@ pub async fn public_support_chat(
         .post(format!("{}/chat/completions", *PROXYAPI_BASE_URL))
         .header("Authorization", format!("Bearer {}", *PROXYAPI_KEY))
         .header("Content-Type", "application/json")
-        .json(&json!({"model": "gemini/gemini-2.0-flash", "temperature": 0.3, "messages": messages}))
+        .json(&json!({"model": "gemini/gemini-2.5-flash", "temperature": 0.3, "messages": messages}))
         .send()
         .await;
 
@@ -3951,7 +3951,7 @@ pub async fn internal_support_chat(
 
     for iteration in 0..max_iterations {
         let request_body = json!({
-            "model": "gemini/gemini-2.0-flash",
+            "model": "gemini/gemini-2.5-flash",
             "temperature": 0.3,
             "messages": messages,
             "tools": tools
