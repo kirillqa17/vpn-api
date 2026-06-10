@@ -43,12 +43,12 @@ mod tests {
     #[test]
     fn link_format() {
         assert_eq!(
-            build_link("svoiweb.ru", "8444", "b6954bf0bdb553293b0a4d751c9205c7"),
-            "tg://proxy?server=svoiweb.ru&port=8444&secret=ddb6954bf0bdb553293b0a4d751c9205c7"
+            build_link("svoiweb.ru", "8444", "deadbeefdeadbeefdeadbeefdeadbeef"),
+            "tg://proxy?server=svoiweb.ru&port=8444&secret=dddeadbeefdeadbeefdeadbeefdeadbeef"
         );
         assert_eq!(
-            build_web_link("svoiweb.ru", "8444", "b6954bf0bdb553293b0a4d751c9205c7"),
-            "https://t.me/proxy?server=svoiweb.ru&port=8444&secret=ddb6954bf0bdb553293b0a4d751c9205c7"
+            build_web_link("svoiweb.ru", "8444", "deadbeefdeadbeefdeadbeefdeadbeef"),
+            "https://t.me/proxy?server=svoiweb.ru&port=8444&secret=dddeadbeefdeadbeefdeadbeefdeadbeef"
         );
     }
 }
