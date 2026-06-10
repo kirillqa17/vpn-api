@@ -69,7 +69,7 @@ pub fn check_admin_key(req: &HttpRequest) -> Option<HttpResponse> {
 }
 
 /// Check internal key. Returns Some(403) if missing or wrong.
-fn check_internal_key(req: &HttpRequest) -> Option<HttpResponse> {
+pub fn check_internal_key(req: &HttpRequest) -> Option<HttpResponse> {
     let provided = req.headers().get("X-Internal-Key")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -1278,6 +1278,34 @@ async fn get_user_uuid(pool: &PgPool, telegram_id: i64) -> Result<String, HttpRe
         .ok_or_else(|| HttpResponse::NotFound().body("User not found"))?;
 
     Ok(row.get::<uuid::Uuid, _>("uuid").to_string())
+}
+
+/// Authed: personal proxy link for the logged-in website user.
+pub async fn web_get_proxy(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {
+    let telegram_id = match jwt::extract_telegram_id(&req) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let row = sqlx::query("SELECT subscription_end FROM users WHERE telegram_id = $1")
+        .bind(telegram_id).fetch_optional(pool.get_ref()).await;
+    let now = chrono::Utc::now();
+    match row {
+        Ok(Some(r)) => {
+            let end: chrono::DateTime<chrono::Utc> = r.get("subscription_end");
+            if end > now {
+                let core = crate::proxy::proxy_secret(&crate::MASTER_KEY, telegram_id);
+                HttpResponse::Ok().json(serde_json::json!({
+                    "active": true,
+                    "link": crate::proxy::build_web_link(&crate::PROXY_HOST, &crate::PROXY_PORT, &core),
+                    "expires": end.to_rfc3339(),
+                }))
+            } else {
+                HttpResponse::Ok().json(serde_json::json!({ "active": false, "link": serde_json::Value::Null, "expires": end.to_rfc3339() }))
+            }
+        }
+        Ok(None) => HttpResponse::Ok().json(serde_json::json!({ "active": false, "link": serde_json::Value::Null, "expires": serde_json::Value::Null })),
+        Err(e) => { log::error!("web_get_proxy db error: {e}"); HttpResponse::InternalServerError().finish() }
+    }
 }
 
 pub async fn web_get_devices(pool: web::Data<PgPool>, req: HttpRequest) -> HttpResponse {

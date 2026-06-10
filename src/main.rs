@@ -21,6 +21,9 @@ lazy_static::lazy_static! {
     static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
     static ref REMNAWAVE_API_BASE: String = std::env::var("REMNAWAVE_API_BASE").unwrap_or_else(|_| "http://localhost:3000/api".to_string());
     static ref REMNAWAVE_API_KEY: String = std::env::var("REMNAWAVE_API_KEY").expect("REMNAWAVE_API_KEY must be set");
+    static ref MASTER_KEY: String = std::env::var("MASTER_KEY").expect("MASTER_KEY must be set");
+    static ref PROXY_HOST: String = std::env::var("PROXY_HOST").unwrap_or_else(|_| "svoiweb.ru".to_string());
+    static ref PROXY_PORT: String = std::env::var("PROXY_PORT").unwrap_or_else(|_| "8444".to_string());
 }
 
 async fn create_user(pool: web::Data<PgPool>, data: web::Json<NewUser>) -> HttpResponse {
@@ -1703,6 +1706,59 @@ async fn get_active_users(pool: web::Data<PgPool>) -> HttpResponse {
     HttpResponse::Ok().json(users)
 }
 
+#[derive(serde::Serialize)]
+struct ProxyResp { active: bool, link: Option<String>, expires: Option<String> }
+
+/// Internal: personal proxy link for the bot. X-Internal-Key required.
+async fn get_user_proxy(req: HttpRequest, pool: web::Data<PgPool>, telegram_id: web::Path<i64>) -> HttpResponse {
+    if let Some(resp) = web_handlers::check_internal_key(&req) { return resp; }
+    let tid = telegram_id.into_inner();
+    let row = sqlx::query("SELECT subscription_end FROM users WHERE telegram_id = $1")
+        .bind(tid).fetch_optional(pool.get_ref()).await;
+    match row {
+        Ok(Some(r)) => {
+            let end: chrono::DateTime<chrono::Utc> = r.get("subscription_end");
+            if end > Utc::now() {
+                let core = proxy::proxy_secret(&MASTER_KEY, tid);
+                HttpResponse::Ok().json(ProxyResp {
+                    active: true,
+                    link: Some(proxy::build_link(&PROXY_HOST, &PROXY_PORT, &core)),
+                    expires: Some(end.to_rfc3339()),
+                })
+            } else {
+                HttpResponse::Ok().json(ProxyResp { active: false, link: None, expires: Some(end.to_rfc3339()) })
+            }
+        }
+        Ok(None) => HttpResponse::Ok().json(ProxyResp { active: false, link: None, expires: None }),
+        Err(e) => { error!("get_user_proxy db error: {e}"); HttpResponse::InternalServerError().finish() }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct RosterEntry { username: String, secret: String, expiration_rfc3339: String }
+
+/// Internal: roster of all active subscribers for the proxy sync service. X-Internal-Key required.
+async fn get_proxy_roster(req: HttpRequest, pool: web::Data<PgPool>) -> HttpResponse {
+    if let Some(resp) = web_handlers::check_internal_key(&req) { return resp; }
+    let rows = sqlx::query("SELECT telegram_id, subscription_end FROM users WHERE subscription_end > NOW()")
+        .fetch_all(pool.get_ref()).await;
+    match rows {
+        Ok(rows) => {
+            let roster: Vec<RosterEntry> = rows.iter().map(|r| {
+                let tid: i64 = r.get("telegram_id");
+                let end: chrono::DateTime<chrono::Utc> = r.get("subscription_end");
+                RosterEntry {
+                    username: format!("tg_{tid}"),
+                    secret: proxy::proxy_secret(&MASTER_KEY, tid),
+                    expiration_rfc3339: end.to_rfc3339(),
+                }
+            }).collect();
+            HttpResponse::Ok().json(roster)
+        }
+        Err(e) => { error!("get_proxy_roster db error: {e}"); HttpResponse::InternalServerError().finish() }
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -1747,6 +1803,8 @@ async fn main() -> std::io::Result<()> {
                     .route(web::patch().to(extend_subscription)),
             )
             .service(web::resource("/users/active").route(web::get().to(get_active_users)))
+            .service(web::resource("/internal/users/{telegram_id}/proxy").route(web::get().to(get_user_proxy)))
+            .service(web::resource("/internal/proxy/roster").route(web::get().to(get_proxy_roster)))
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/expiring").route(web::get().to(get_expiring_users)))
             .service(web::resource("/users/expired").route(web::get().to(get_expired_users)))
@@ -1838,6 +1896,8 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::internal_confirm_verify_code)))
             .service(web::resource("/web/me")
                 .route(web::get().to(web_handlers::web_get_me)))
+            .service(web::resource("/web/me/proxy")
+                .route(web::get().to(web_handlers::web_get_proxy)))
             .service(web::resource("/web/me/devices")
                 .route(web::get().to(web_handlers::web_get_devices)))
             .service(web::resource("/web/me/devices/{hwid}")
