@@ -1845,6 +1845,10 @@ async fn main() -> std::io::Result<()> {
                 .route(web::post().to(web_handlers::auth_email_register)))
             .service(web::resource("/web/auth/login")
                 .route(web::post().to(web_handlers::auth_email_login)))
+            // Generic-client session: mint a token from an imported SvoiVPN
+            // subscription link (iOS has no sign-in screen — see auth_sub_session).
+            .service(web::resource("/web/auth/sub-session")
+                .route(web::post().to(web_handlers::auth_sub_session)))
             .service(web::resource("/web/auth/link-email")
                 .route(web::post().to(web_handlers::auth_link_email)))
             .service(web::resource("/web/auth/claim-email")

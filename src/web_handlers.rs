@@ -494,6 +494,56 @@ pub async fn auth_email_login(
     HttpResponse::Ok().json(json!({ "token": token, "telegram_id": telegram_id }))
 }
 
+#[derive(serde::Deserialize)]
+pub struct SubSessionRequest {
+    pub sub_link: String,
+}
+
+/// POST /web/auth/sub-session — mint a session token from an imported
+/// subscription link instead of an email/password login.
+///
+/// The iOS app ships as a generic VPN client (no sign-in screen). When the user
+/// imports their SvoiVPN subscription URL, the app posts that URL here; we map
+/// it back to the owning account and return the same JWT a normal login would.
+/// This unlocks the *free* extras (news / support / account info) for SvoiVPN
+/// users without a paid-account sign-in — the paid servers themselves arrive
+/// generically from the imported subscription body.
+pub async fn auth_sub_session(
+    pool: web::Data<PgPool>,
+    data: web::Json<SubSessionRequest>,
+) -> HttpResponse {
+    let sub_link = data.sub_link.trim();
+    if sub_link.is_empty() {
+        return HttpResponse::BadRequest().json(json!({"error": "sub_link required"}));
+    }
+
+    // Primary match: the exact stored sub_link. Fallback: the trailing token /
+    // UUID segment, so minor host/format differences still resolve. The token is
+    // a UUID (no SQL-LIKE wildcards), so the LIKE is safe.
+    let token_part = sub_link.rsplit('/').next().unwrap_or("").trim().to_string();
+
+    let row = match sqlx::query(
+        "SELECT telegram_id FROM users WHERE sub_link = $1 OR ($2 <> '' AND sub_link LIKE '%' || $2)"
+    )
+        .bind(sub_link)
+        .bind(&token_part)
+        .fetch_optional(pool.get_ref())
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return HttpResponse::NotFound().json(json!({"error": "subscription not recognized"})),
+        Err(e) => { error!("[auth_sub_session] db error: {}", e); return HttpResponse::InternalServerError().json(json!({"error": "internal server error"})); }
+    };
+
+    let telegram_id: i64 = row.get("telegram_id");
+    let token = match jwt::create_token(telegram_id) {
+        Ok(t) => t,
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"error": "token error"})),
+    };
+    info!("[auth_sub_session] sub-session minted for id={}", telegram_id);
+    HttpResponse::Ok().json(json!({ "token": token, "telegram_id": telegram_id }))
+}
+
 pub async fn auth_forgot_password(
     pool: web::Data<PgPool>,
     data: web::Json<ForgotPasswordRequest>,
