@@ -17,8 +17,13 @@ pub struct Claims {
 }
 
 pub fn create_token(telegram_id: i64) -> Result<String, jsonwebtoken::errors::Error> {
+    // Sessions never expire by product decision. We still emit an `exp` claim
+    // (the Claims struct requires it and some JWT tooling expects it), but set
+    // it ~100 years out. Combined with `validate_exp = false` on decode below,
+    // no user is ever signed out due to token age — including holders of older
+    // 30-day tokens issued before this change.
     let expiration = chrono::Utc::now()
-        .checked_add_signed(chrono::Duration::days(30))
+        .checked_add_signed(chrono::Duration::days(36_500))
         .expect("valid timestamp")
         .timestamp() as usize;
 
@@ -45,12 +50,17 @@ pub fn extract_telegram_id(req: &HttpRequest) -> Result<i64, HttpResponse> {
         .strip_prefix("Bearer ")
         .ok_or_else(|| HttpResponse::Unauthorized().body("Invalid Authorization format"))?;
 
+    // Do NOT reject tokens for being past their `exp` — sessions are permanent.
+    // Signature is still verified, so tampered/forged tokens are rejected.
+    let mut validation = Validation::default();
+    validation.validate_exp = false;
+
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(JWT_SECRET.as_bytes()),
-        &Validation::default(),
+        &validation,
     )
-    .map_err(|_| HttpResponse::Unauthorized().body("Invalid or expired token"))?;
+    .map_err(|_| HttpResponse::Unauthorized().body("Invalid token"))?;
 
     Ok(token_data.claims.telegram_id)
 }
