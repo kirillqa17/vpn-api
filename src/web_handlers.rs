@@ -2362,8 +2362,9 @@ pub async fn web_support_chat(
     } else {
         // Add history in chronological order (reverse the DESC result)
         let hist_messages: Vec<serde_json::Value> = history.iter().rev().map(|row| {
+            let role: String = row.get("role");
             json!({
-                "role": row.get::<String, _>("role"),
+                "role": map_role_for_llm(&role),
                 "content": row.get::<String, _>("content")
             })
         }).collect();
@@ -2464,6 +2465,19 @@ fn session_to_telegram_id(session_id: &str) -> i64 {
     -((hash % 9_000_000 + 3_000_000) as i64) // -3M to -12M range
 }
 
+/// Map a stored `support_chats.role` to a role the OpenAI-compatible
+/// ProxyAPI/Gemini chat-completions endpoint accepts. Operator replies are
+/// stored as "admin", which the model API rejects (only system/user/assistant
+/// are valid) and which otherwise makes the whole request fail. Present "admin"
+/// (and any other non-standard role) to the model as "assistant".
+fn map_role_for_llm(role: &str) -> &str {
+    match role {
+        "user" => "user",
+        "system" => "system",
+        _ => "assistant",
+    }
+}
+
 pub async fn public_support_history(
     pool: web::Data<PgPool>,
     query: web::Query<HashMap<String, String>>,
@@ -2473,6 +2487,17 @@ pub async fn public_support_history(
         _ => return HttpResponse::BadRequest().json(json!({"error": "session_id required"})),
     };
     let telegram_id = session_to_telegram_id(session_id);
+
+    // Reflect the real escalation state so the widget can show the
+    // waiting-for-operator badge and stop expecting AI replies.
+    let escalated = sqlx::query(
+        "SELECT telegram_id FROM support_tickets WHERE telegram_id = $1 AND status = 'open' LIMIT 1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .unwrap_or(None)
+    .is_some();
 
     let rows = sqlx::query(
         "SELECT role, content, created_at FROM support_chats WHERE telegram_id = $1 AND role != 'system' AND content NOT LIKE '[SYSTEM]%' ORDER BY created_at ASC LIMIT 100"
@@ -2493,7 +2518,7 @@ pub async fn public_support_history(
                     "created_at": created_at.to_rfc3339()
                 })
             }).collect();
-            HttpResponse::Ok().json(json!({ "messages": messages, "escalated": false }))
+            HttpResponse::Ok().json(json!({ "messages": messages, "escalated": escalated }))
         }
         Err(e) => { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(json!({"error": "internal server error"})) }
     }
@@ -2516,6 +2541,26 @@ pub async fn public_support_chat(
     let telegram_id = session_to_telegram_id(session_id);
     let user_context = "Контекст: анонимный пользователь с сайта (не авторизован)".to_string();
 
+    // Check for an active operator ticket — skip the AI if escalated, but still
+    // persist the user's message so the operator sees it. Without this check the
+    // AI keeps answering after handoff, and an operator reply already in history
+    // would be sent to the model as role="admin" and fail the request (503).
+    let has_ticket = sqlx::query(
+        "SELECT telegram_id FROM support_tickets WHERE telegram_id = $1 AND status = 'open' LIMIT 1"
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool.get_ref())
+    .await
+    .unwrap_or(None)
+    .is_some();
+
+    if has_ticket {
+        let _ = sqlx::query("INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'user', $2)")
+            .bind(telegram_id).bind(user_message).execute(pool.get_ref()).await;
+        info!("[public_support_chat] Session {} has open ticket, skipping AI", telegram_id);
+        return HttpResponse::Ok().json(json!({"response": null, "escalated": true}));
+    }
+
     // Fetch history
     let history = sqlx::query(
         "SELECT role, content FROM support_chats WHERE telegram_id = $1 ORDER BY created_at DESC LIMIT 40"
@@ -2524,6 +2569,11 @@ pub async fn public_support_chat(
     .fetch_all(pool.get_ref())
     .await
     .unwrap_or_default();
+
+    // Persist the user message now, before calling the model, so it is never
+    // lost if the AI call fails (returns 503).
+    let _ = sqlx::query("INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'user', $2)")
+        .bind(telegram_id).bind(user_message).execute(pool.get_ref()).await;
 
     // Build messages for AI
     let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -2541,7 +2591,8 @@ pub async fn public_support_chat(
         messages.push(json!({"role": "assistant", "content": "Здравствуйте! Я — ИИ-ассистент службы поддержки SvoiVPN. Чем могу Вам помочь?"}));
     } else {
         let hist_messages: Vec<serde_json::Value> = history.iter().rev().map(|row| {
-            json!({"role": row.get::<String, _>("role"), "content": row.get::<String, _>("content")})
+            let role: String = row.get("role");
+            json!({"role": map_role_for_llm(&role), "content": row.get::<String, _>("content")})
         }).collect();
         messages.extend(hist_messages);
     }
@@ -2565,9 +2616,7 @@ pub async fn public_support_chat(
         }
     };
 
-    // Save messages
-    let _ = sqlx::query("INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'user', $2)")
-        .bind(telegram_id).bind(user_message).execute(pool.get_ref()).await;
+    // User message already persisted above; save the AI response.
     let _ = sqlx::query("INSERT INTO support_chats (telegram_id, role, content) VALUES ($1, 'assistant', $2)")
         .bind(telegram_id).bind(&ai_response).execute(pool.get_ref()).await;
 
@@ -3987,8 +4036,9 @@ pub async fn internal_support_chat(
     } else {
         // Add history in chronological order (reverse the DESC result)
         let hist_messages: Vec<serde_json::Value> = history.iter().rev().map(|row| {
+            let role: String = row.get("role");
             json!({
-                "role": row.get::<String, _>("role"),
+                "role": map_role_for_llm(&role),
                 "content": row.get::<String, _>("content")
             })
         }).collect();
@@ -6105,5 +6155,33 @@ pub async fn web_update_notifications(
             error!("[web_update_notifications] DB error: {}", e);
             HttpResponse::InternalServerError().json(json!({"error": "internal server error"}))
         }
+    }
+}
+
+#[cfg(test)]
+mod role_mapping_tests {
+    use super::map_role_for_llm;
+
+    // Operator replies are stored with role="admin", but the OpenAI-compatible
+    // ProxyAPI/Gemini endpoint only accepts system/user/assistant roles. Passing
+    // "admin" makes the whole chat-completions request fail (non-2xx -> 503) once
+    // an operator has replied, so the stored history role must be mapped before
+    // it is sent to the model.
+    #[test]
+    fn admin_role_maps_to_assistant() {
+        assert_eq!(map_role_for_llm("admin"), "assistant");
+    }
+
+    #[test]
+    fn standard_llm_roles_are_preserved() {
+        assert_eq!(map_role_for_llm("user"), "user");
+        assert_eq!(map_role_for_llm("assistant"), "assistant");
+        assert_eq!(map_role_for_llm("system"), "system");
+    }
+
+    #[test]
+    fn unknown_roles_default_to_assistant() {
+        assert_eq!(map_role_for_llm("operator"), "assistant");
+        assert_eq!(map_role_for_llm(""), "assistant");
     }
 }
