@@ -2264,6 +2264,54 @@ pub async fn web_support_history(pool: web::Data<PgPool>, req: HttpRequest) -> H
     }
 }
 
+/// The LLM (gemini-flash) occasionally fabricates the subscription link instead of using the real
+/// one — it echoes the "XXXXXX" placeholder from the prompt, or hallucinates a base64 / JWT /
+/// numeric token (~7% of link replies, confirmed from support_chats). Since `users.sub_link` is
+/// authoritative, forcibly rewrite ANY `sub.svoi-connect.ru/<token>` in the AI reply to the user's
+/// real link. Guarantees the user is never handed a wrong subscription link.
+async fn enforce_correct_sub_link(pool: &PgPool, telegram_id: i64, response: String) -> String {
+    const HOST: &str = "sub.svoi-connect.ru/";
+    if !response.contains(HOST) {
+        return response;
+    }
+    let real = match sqlx::query("SELECT sub_link FROM users WHERE telegram_id = $1")
+        .bind(telegram_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| row.get::<String, _>("sub_link"))
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(s) => s,
+        None => return response, // no known link for this user -> leave text untouched
+    };
+    let real = real.trim();
+    let mut out = String::with_capacity(response.len());
+    let mut rest = response.as_str();
+    let mut replaced = false;
+    while let Some(hpos) = rest.find(HOST) {
+        let before = &rest[..hpos];
+        let scheme = if before.ends_with("https://") { 8 }
+                     else if before.ends_with("http://") { 7 }
+                     else { 0 };
+        out.push_str(&rest[..hpos - scheme]); // keep text before the (possibly schemed) URL
+        out.push_str(real);                   // insert the correct full link
+        let after = hpos + HOST.len();
+        let tok_end = rest[after..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '='))
+            .map(|p| after + p)
+            .unwrap_or(rest.len());
+        rest = &rest[tok_end..];
+        replaced = true;
+    }
+    out.push_str(rest);
+    if replaced {
+        info!("[support_chat] rewrote fabricated sub-link -> real for user {}", telegram_id);
+    }
+    out
+}
+
 pub async fn web_support_chat(
     pool: web::Data<PgPool>,
     req: HttpRequest,
@@ -2427,6 +2475,9 @@ pub async fn web_support_chat(
             }
         }
     };
+
+    // The LLM sometimes fabricates the sub-link — force it to the user's real one.
+    let ai_response = enforce_correct_sub_link(pool.get_ref(), telegram_id, ai_response).await;
 
     // 5. Persist user message and AI response
     let _ = sqlx::query(
@@ -4248,6 +4299,9 @@ pub async fn internal_support_chat(
     if ai_response.is_empty() {
         ai_response = "Извините, произошла ошибка при обработке запроса. Попробуйте ещё раз или свяжитесь с оператором.".to_string();
     }
+
+    // The LLM sometimes fabricates the sub-link (placeholder/hallucination) — force it to the real one.
+    ai_response = enforce_correct_sub_link(pool.get_ref(), telegram_id, ai_response).await;
 
     // 6. Persist user message and AI response
     let _ = sqlx::query(
