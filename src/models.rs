@@ -26,6 +26,8 @@ pub struct User {
     pub device_limit: i64,
     pub auto_renew: bool,
     pub payment_method_id: Option<String>,
+    // Магазин ЮКассы, выдавший payment_method_id: "bot" | "web" (NULL = "bot")
+    pub payment_method_shop: Option<String>,
     pub auto_renew_plan: Option<String>,
     pub auto_renew_duration: Option<String>,
     pub auto_renew_last_attempt: Option<DateTime<Utc>>,
