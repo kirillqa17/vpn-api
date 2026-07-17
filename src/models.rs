@@ -103,6 +103,8 @@ pub struct SavePaymentMethodRequest {
     pub plan: String,
     pub duration: String,
     pub card_last4: Option<String>,
+    // Магазин ЮКассы, выдавший payment_method_id: "bot" | "web" (None = "bot")
+    pub shop: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +118,7 @@ pub struct ToggleAutoRenewRequest {
 pub struct AutoRenewUser {
     pub telegram_id: i64,
     pub payment_method_id: Option<String>,
+    pub payment_method_shop: Option<String>,
     pub auto_renew_plan: Option<String>,
     pub auto_renew_duration: Option<String>,
     pub subscription_end: DateTime<Utc>,

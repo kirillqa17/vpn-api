@@ -1308,13 +1308,14 @@ async fn save_payment_method(
     let telegram_id = telegram_id.into_inner();
     info!("[save_payment_method] telegram_id={}, plan={}, duration={}, card_last4={:?}", telegram_id, data.plan, data.duration, data.card_last4);
     let result = sqlx::query(
-        "UPDATE users SET payment_method_id = $1, auto_renew_plan = $2, auto_renew_duration = $3, card_last4 = $5 WHERE telegram_id = $4"
+        "UPDATE users SET payment_method_id = $1, auto_renew_plan = $2, auto_renew_duration = $3, card_last4 = $5, payment_method_shop = $6 WHERE telegram_id = $4"
     )
     .bind(&data.payment_method_id)
     .bind(&data.plan)
     .bind(&data.duration)
     .bind(telegram_id)
     .bind(&data.card_last4)
+    .bind(data.shop.as_deref().unwrap_or("bot"))
     .execute(pool.get_ref())
     .await;
 
@@ -1337,7 +1338,7 @@ async fn delete_payment_method(
     let telegram_id = telegram_id.into_inner();
     info!("[delete_payment_method] telegram_id={}", telegram_id);
     let result = sqlx::query(
-        "UPDATE users SET payment_method_id = NULL, auto_renew = FALSE, auto_renew_plan = NULL, auto_renew_duration = NULL, auto_renew_fail_count = 0, card_last4 = NULL WHERE telegram_id = $1"
+        "UPDATE users SET payment_method_id = NULL, payment_method_shop = NULL, auto_renew = FALSE, auto_renew_plan = NULL, auto_renew_duration = NULL, auto_renew_fail_count = 0, card_last4 = NULL WHERE telegram_id = $1"
     )
     .bind(telegram_id)
     .execute(pool.get_ref())
@@ -1435,7 +1436,8 @@ async fn get_auto_renew_users(
 
     let users = match sqlx::query_as::<_, AutoRenewUser>(
         r#"
-        SELECT telegram_id, payment_method_id, auto_renew_plan, auto_renew_duration,
+        SELECT telegram_id, payment_method_id, COALESCE(payment_method_shop, 'bot') AS payment_method_shop,
+               auto_renew_plan, auto_renew_duration,
                subscription_end, plan, username, auto_renew_fail_count
         FROM users
         WHERE auto_renew = TRUE

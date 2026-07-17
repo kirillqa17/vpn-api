@@ -1611,9 +1611,8 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
         _ => "",
     };
 
-    // Create YooKassa payment
-    let yookassa_shop_id = std::env::var("YOOKASSA_SHOP_ID").unwrap_or_default();
-    let yookassa_secret = std::env::var("YOOKASSA_SECRET_KEY").unwrap_or_default();
+    // Create YooKassa payment (в магазине сайта, не бота)
+    let (yookassa_shop_id, yookassa_secret) = web_yookassa_creds();
 
     // Only save payment method if user has auto_renew enabled (otherwise SBP available)
     let save_method = sqlx::query_scalar::<_, bool>("SELECT auto_renew FROM users WHERE telegram_id = $1")
@@ -1734,6 +1733,21 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
     }
 }
 
+/// Креды магазина ЮКассы для платежей С САЙТА. ЮКасса требует отдельный
+/// магазин на каждый канал продаж (бот и svoiweb.ru — разные магазины);
+/// пока YOOKASSA_WEB_* не заданы — фолбэк на ботовский магазин.
+fn web_yookassa_creds() -> (String, String) {
+    let shop_id = std::env::var("YOOKASSA_WEB_SHOP_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| std::env::var("YOOKASSA_SHOP_ID").unwrap_or_default());
+    let secret = std::env::var("YOOKASSA_WEB_SECRET_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| std::env::var("YOOKASSA_SECRET_KEY").unwrap_or_default());
+    (shop_id, secret)
+}
+
 fn get_price_map() -> HashMap<String, i64> {
     let mut m = HashMap::new();
     let pairs = [
@@ -1768,8 +1782,7 @@ pub async fn web_payment_status(payment_id: web::Path<String>, req: HttpRequest)
         return HttpResponse::Unauthorized().body("Unauthorized");
     }
 
-    let yookassa_shop_id = std::env::var("YOOKASSA_SHOP_ID").unwrap_or_default();
-    let yookassa_secret = std::env::var("YOOKASSA_SECRET_KEY").unwrap_or_default();
+    let (yookassa_shop_id, yookassa_secret) = web_yookassa_creds();
 
     let resp = HTTP_CLIENT
         .get(&format!("https://api.yookassa.ru/v3/payments/{}", payment_id.into_inner()))
@@ -2116,7 +2129,7 @@ pub async fn web_unbind_card(pool: web::Data<PgPool>, req: HttpRequest) -> HttpR
     };
 
     let result = sqlx::query(
-        "UPDATE users SET payment_method_id = NULL, auto_renew = false WHERE telegram_id = $1"
+        "UPDATE users SET payment_method_id = NULL, payment_method_shop = NULL, auto_renew = false WHERE telegram_id = $1"
     )
     .bind(telegram_id)
     .execute(pool.get_ref())
