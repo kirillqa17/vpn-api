@@ -1623,6 +1623,14 @@ pub async fn web_create_payment(pool: web::Data<PgPool>, req: HttpRequest, data:
         .flatten()
         .unwrap_or(false);
 
+    // Привязка карты доступна, только когда ЮКасса включила «автоплатежи»
+    // на магазине сайта (YOOKASSA_WEB_RECURRING=true): без опции платёж с
+    // save_payment_method падает целиком с forbidden — юзер не смог бы платить.
+    let web_recurring = std::env::var("YOOKASSA_WEB_RECURRING")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let save_method = save_method && web_recurring;
+
     // Map duration code to Russian plan name (must match webhook's subscription_mapping)
     let plan_name = match data.duration.as_str() {
         "1m" => "1 месяц",
