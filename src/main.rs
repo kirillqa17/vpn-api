@@ -864,6 +864,69 @@ async fn get_expiring_users(
     HttpResponse::Ok().json(users)
 }
 
+/// Триальщики, у которых пробный период кончается в ближайший час.
+/// Дедуп — trial_last_hour_notified помечается в той же транзакции, в которой
+/// юзер возвращается боту, так что каждый приходит ровно один раз.
+async fn get_trial_ending_users(pool: web::Data<PgPool>) -> HttpResponse {
+    info!("[get_trial_ending_users] Checking for trials ending within the hour");
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) },
+    };
+
+    let users = match sqlx::query_as!(
+        ExpiringUser,
+        r#"
+        SELECT telegram_id, subscription_end, username, plan
+        FROM users
+        WHERE plan = 'trial'
+          AND is_active IN (1, 2)
+          AND subscription_end BETWEEN NOW() AND NOW() + INTERVAL '60 minutes'
+          AND NOT trial_last_hour_notified
+        ORDER BY subscription_end ASC
+        "#
+    )
+    .fetch_all(&mut *tx)
+    .await {
+        Ok(users) => users,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
+        }
+    };
+
+    if users.is_empty() {
+        let _ = tx.commit().await;
+        return HttpResponse::Ok().json(users);
+    }
+
+    let telegram_ids: Vec<i64> = users.iter().map(|u| u.telegram_id).collect();
+    info!("[get_trial_ending_users] Found {} users: {:?}", users.len(), telegram_ids);
+
+    match sqlx::query!(
+        r#"
+        UPDATE users
+        SET trial_last_hour_notified = TRUE
+        WHERE telegram_id = ANY($1)
+        "#,
+        &telegram_ids
+    )
+    .execute(&mut *tx)
+    .await {
+        Ok(_) => (),
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
+        }
+    };
+
+    if let Err(e) = tx.commit().await {
+        return { error!("Internal error: {}", e); HttpResponse::InternalServerError().json(serde_json::json!({"error": "internal server error"})) };
+    }
+
+    HttpResponse::Ok().json(users)
+}
+
 async fn get_expired_users(pool: web::Data<PgPool>) -> HttpResponse {
     info!("[get_expired_users] Checking for expired users");
     let mut tx = match pool.begin().await {
@@ -1810,6 +1873,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/users/add_referral").route(web::post().to(add_referral)))
             .service(web::resource("/users/expiring").route(web::get().to(get_expiring_users)))
             .service(web::resource("/users/expired").route(web::get().to(get_expired_users)))
+            .service(web::resource("/users/trial_ending").route(web::get().to(get_trial_ending_users)))
             .service(web::resource("/users/auto_renew_due").route(web::get().to(get_auto_renew_users)))
             .service(web::resource("/users/{telegram_id}/info").route(web::get().to(get_user_info)))
             .service(web::resource("/users/{telegram_id}/trial").route(web::patch().to(trial)))

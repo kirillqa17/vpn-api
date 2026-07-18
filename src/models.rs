@@ -36,6 +36,7 @@ pub struct User {
     pub card_last4: Option<String>,
     pub first_purchase_bonus_used: bool,
     pub first_purchase_bonus_deadline: Option<DateTime<Utc>>,
+    pub trial_last_hour_notified: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
