@@ -96,6 +96,19 @@ async fn auto_register_user(pool: &PgPool, telegram_id: i64, username: Option<St
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
         .collect();
     let username = if username.is_empty() { format!("user_{}", telegram_id) } else { username };
+    // Remnawave caps usernames at 36 chars and rejects the whole create with a
+    // 400 — which surfaced to the user as "Ошибка при создании аккаунта", i.e.
+    // anyone with a long email simply could not register. Truncate, keeping an
+    // id suffix so two addresses sharing a prefix can't collide.
+    const REMNAWAVE_USERNAME_MAX: usize = 36;
+    let username = if username.chars().count() > REMNAWAVE_USERNAME_MAX {
+        let suffix = format!("_{}", telegram_id.unsigned_abs());
+        let keep = REMNAWAVE_USERNAME_MAX.saturating_sub(suffix.chars().count());
+        let prefix: String = username.chars().take(keep).collect();
+        format!("{}{}", prefix, suffix)
+    } else {
+        username
+    };
     info!("[auto_register] Creating user {} ({}) referral={:?}", telegram_id, username, referral_id);
 
     // Create in Remnawave
